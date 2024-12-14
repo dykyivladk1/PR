@@ -66,5 +66,5 @@ python train_pretrained.py --test_from_checkpoint /path/to/downloaded.ckpt
 ## RESULTS 
 
 ## Beats Model provided by DESED_task
-PSDS_scenario 1: 0.459
+PSDS_scenario 1: 0.463
 I will do table soon...
