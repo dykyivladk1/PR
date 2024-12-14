@@ -1,3 +1,4 @@
+
 # PR: Practical Work in AI JKU
 
 # Sound Event Detection with Transformers
@@ -13,9 +14,12 @@ Sound Event Detection aims to identify and classify sound events in audio stream
 ## Project Workflow
 
 ### Clone DCASE repository:
+```bash
 git clone https://github.com/DCASE-REPO/DESED_task.git
+```
 
 ### Install needed dependencies:
+```bash
 apt-get install -y sox libsox-dev libsox-fmt-all
 pip install desed
 pip install pytorch_lightning
@@ -24,6 +28,7 @@ pip install codecarbon
 pip install psds_eval
 pip install thop
 pip install torchlibrosa
+```
 
 ### Note on Pretrained BEATS Model:
 The weights for the 'BEATS' model are corrupted in the official repository of 2023. Ensure you download the pretrained BEATS model for extracting embeddings from the following link:  
@@ -33,22 +38,28 @@ The weights for the 'BEATS' model are corrupted in the official repository of 20
 
 ### Dataset Preparation
 After downloading the repository, navigate to it and download the dataset:
+```bash
 cd DESED_task/recipes/dcase2023_task4_baseline
 python generate_dcase_task4_2023.py --only_synth
 python generate_dcase_task4_2023.py --only_real
+```
 Use these commands if you do not need the strong labeled training set.
 
 ---
 
 ### Pre-compute Embeddings:
+```bash
 python extract_embeddings.py --output_dir ./embeddings --pretrained_model "beats"
-Ensure the embeddings are stored in the embeddings folder.
+```
+Ensure the embeddings are stored in the `embeddings` folder.
 
 ---
 
 ### Train the Model:
 Run the training script:
+```bash
 python train_pretrained.py --test_from_checkpoint /path/to/downloaded.ckpt
+```
 
 ---
 
