@@ -42,7 +42,10 @@ pip install torchlibrosa
 The weights for the 'BEATS' model are corrupted in the official repository of 2023. Ensure you download the pretrained BEATS model for extracting embeddings from the following link:  
 [Download BEATS Pretrained Model](https://onedrive.live.com/?authkey=%21AGOyB4YHPatKU%2D0&id=6B83B49411CA81A7%2125958&cid=6B83B49411CA81A7&parId=root&parQt=sharedby&o=OneUp)
 
+In original code, they use older versions of PyTorch, and before loading the weights I have modified the file 
+`cd DESED_task/recipes/dcase2023_task4_baseline/local/beats/BEATs.py`, particularly this line checkpoint = torch.load(cfg_path, weights_only=False).
 
+The code for downloading all specified datasets, has some problems with missing files, so it is better to download files manually and place them in the `data` folder.
 
 ---
 
