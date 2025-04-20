@@ -4,6 +4,9 @@
 
 This repository contains the practical work for the AI course at JKU, focusing on Sound Event Detection (SED) using pre-trained transformers and the DCASE 2023 baseline system.
 
+This project uses the 2023 baseline recipe located in:
+https://github.com/DCASE-REPO/DESED_task/tree/master
+
 ---
 
 ## Overview
