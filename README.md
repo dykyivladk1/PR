@@ -38,9 +38,11 @@ pip install torchlibrosa
 
 ---
 
-### Note on Pretrained BEATS Model
+### Note on edits I have done with original code.
 The weights for the 'BEATS' model are corrupted in the official repository of 2023. Ensure you download the pretrained BEATS model for extracting embeddings from the following link:  
 [Download BEATS Pretrained Model](https://onedrive.live.com/?authkey=%21AGOyB4YHPatKU%2D0&id=6B83B49411CA81A7%2125958&cid=6B83B49411CA81A7&parId=root&parQt=sharedby&o=OneUp)
+
+
 
 ---
 
@@ -48,10 +50,9 @@ The weights for the 'BEATS' model are corrupted in the official repository of 20
 After downloading the repository, navigate to it and download the dataset:
 ```bash
 cd DESED_task/recipes/dcase2023_task4_baseline
-python generate_dcase_task4_2023.py --only_synth
-python generate_dcase_task4_2023.py --only_real
+python generate_dcase_task4_2023.py
 ```
-Use these commands if you do not need the strong labeled training set.
+Use these commands if you want all datasets.
 
 ---
 
@@ -59,7 +60,7 @@ Use these commands if you do not need the strong labeled training set.
 ```bash
 python extract_embeddings.py --output_dir ./embeddings --pretrained_model "beats"
 ```
-Ensure the embeddings are stored in the `embeddings` folder.
+After running this, ensure the embeddings are stored in the `embeddings` folder.
 
 ---
 
