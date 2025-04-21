@@ -118,8 +118,6 @@ DESED_task/data/dcase/dataset/audio/train_augmented/
 
 After testing all of the models with augmented dataset, we have the results provided below:
 
----
-
 ## Results After Augmentation
 
 | Model         | PSDS-scenario1 (Original) | PSDS-scenario1 (Augmented) | Notes                                   |
@@ -129,8 +127,6 @@ After testing all of the models with augmented dataset, we have the results prov
 | BEATs ssl     | 0.465                      | 0.479                       | Minor gains due to limited capacity     |
 
 
-
----
 
 
 ---
