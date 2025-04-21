@@ -116,9 +116,7 @@ This script processes all `.wav` files in the training set and saves augmented c
 DESED_task/data/dcase/dataset/audio/train_augmented/
 ```
 
-Ensure that these augmented files are later included during embedding extraction and model training by modifying your dataloader or preprocessing pipeline accordingly.
-
-Also, rerun extraction of embeddings, and testing the models.
+After testing all of the models with augmented dataset, we have the results provided below:
 
 ---
 
