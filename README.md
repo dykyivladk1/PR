@@ -68,6 +68,13 @@ After running this, ensure the embeddings are stored in the `embeddings` folder.
 ---
 
 
+### Test pretrained models
+
+
+```bash
+python train_pretrained.py --test_from_checkpoint /path/to/your_checkpoint.ckpt
+```
+
 ## Model Evaluation Plan
 
 This project evaluates the performance of various BEATs models by extracting embeddings and training a CRNN classifier on them. The goal is to identify which model yields the best PSDS1 score.
