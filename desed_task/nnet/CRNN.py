@@ -8,6 +8,45 @@ from .CNN import CNN
 from .RNN import BidirectionalGRU
 
 
+class SelfAttention(nn.Module):
+    """Self attention layer for CRNN model"""
+    def __init__(self, hidden_size):
+        super(SelfAttention, self).__init__()
+        self.hidden_size = hidden_size
+        self.query = nn.Linear(hidden_size, hidden_size)
+        self.key = nn.Linear(hidden_size, hidden_size)
+        self.value = nn.Linear(hidden_size, hidden_size)
+        self.scale = torch.sqrt(torch.FloatTensor([hidden_size]))
+        self.dropout = nn.Dropout(0.1)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+        
+    def forward(self, x, mask=None):
+        batch_size, seq_len, hidden_size = x.shape
+        
+        q = self.query(x)  # [batch_size, seq_len, hidden_size]
+        k = self.key(x)    # [batch_size, seq_len, hidden_size]
+        v = self.value(x)  # [batch_size, seq_len, hidden_size]
+        
+        # Compute attention scores
+        energy = torch.bmm(q, k.transpose(1, 2)) / self.scale.to(x.device)  # [batch_size, seq_len, seq_len]
+        
+        # Apply mask if provided
+        if mask is not None:
+            energy = energy.masked_fill(mask.unsqueeze(1), -1e30)
+            
+        # Apply softmax to get attention weights
+        attention = torch.softmax(energy, dim=-1)  # [batch_size, seq_len, seq_len]
+        attention = self.dropout(attention)
+        
+        # Apply attention weights to values
+        out = torch.bmm(attention, v)  # [batch_size, seq_len, hidden_size]
+        
+        # Apply residual connection and layer normalization
+        out = self.layer_norm(x + out)
+        
+        return out, attention
+
+
 class CRNN(nn.Module):
     def __init__(
         self,
@@ -34,6 +73,10 @@ class CRNN(nn.Module):
         specaugm_f_l=10,
         dropstep_recurrent=0.0,
         dropstep_recurrent_len=5,
+        use_self_attention=False,
+        use_multihead_attention=False,
+        use_layer_norm=False,
+        use_residual=False,
         **kwargs,
     ):
         """
@@ -46,12 +89,24 @@ class CRNN(nn.Module):
             activation: str, activation function
             dropout: float, dropout
             train_cnn: bool, training cnn layers
-            rnn_type: str, rnn type
+            rnn_type: str, rnn type ('BGRU' or 'BLSTM')
             n_RNN_cell: int, RNN nodes
             n_layer_RNN: int, number of RNN layers
             dropout_recurrent: float, recurrent layers dropout
             cnn_integration: bool, integration of cnn
-            freeze_bn:
+            freeze_bn: bool, freeze batch normalization layers
+            use_embeddings: bool, use pre-trained embeddings
+            embedding_size: int, size of embeddings
+            embedding_type: str, type of embeddings
+            frame_emb_enc_dim: int, dimension of frame embeddings encoder
+            aggregation_type: str, type of aggregation
+            specaugm_t_p, specaugm_t_l, specaugm_f_p, specaugm_f_l: SpecAugment parameters
+            dropstep_recurrent: float, probability for recurrent dropout
+            dropstep_recurrent_len: int, length for recurrent dropout
+            use_self_attention: bool, use self-attention mechanism
+            use_multihead_attention: bool, use multihead attention
+            use_layer_norm: bool, use layer normalization
+            use_residual: bool, use residual connections
             **kwargs: keywords arguments for CNN.
         """
         super(CRNN, self).__init__()
@@ -66,6 +121,13 @@ class CRNN(nn.Module):
         self.nclass = nclass
         self.dropstep_recurrent = dropstep_recurrent
         self.dropstep_recurrent_len = dropstep_recurrent_len
+        
+        # New parameters
+        self.use_self_attention = use_self_attention
+        self.use_multihead_attention = use_multihead_attention
+        self.use_layer_norm = use_layer_norm
+        self.use_residual = use_residual
+        self.rnn_type = rnn_type
 
         self.specaugm_t_p = specaugm_t_p
         self.specaugm_t_l = specaugm_t_l
@@ -86,27 +148,56 @@ class CRNN(nn.Module):
             for param in self.cnn.parameters():
                 param.requires_grad = False
 
+        # RNN setup
+        nb_in = self.cnn.nb_filters[-1]
+        if self.cnn_integration:
+            nb_in = nb_in * n_in_channel
+            
+        # Select RNN type
         if rnn_type == "BGRU":
-            nb_in = self.cnn.nb_filters[-1]
-            if self.cnn_integration:
-                # self.fc = nn.Linear(nb_in * n_in_channel, nb_in)
-                nb_in = nb_in * n_in_channel
             self.rnn = BidirectionalGRU(
                 n_in=nb_in,
                 n_hidden=n_RNN_cell,
                 dropout=dropout_recurrent,
                 num_layers=n_layers_RNN,
             )
+        elif rnn_type == "BLSTM":
+            self.rnn = nn.LSTM(
+                input_size=nb_in,
+                hidden_size=n_RNN_cell,
+                num_layers=n_layers_RNN, 
+                batch_first=True,
+                dropout=dropout_recurrent if n_layers_RNN > 1 else 0,
+                bidirectional=True
+            )
         else:
-            NotImplementedError("Only BGRU supported for CRNN for now")
+            raise NotImplementedError(f"RNN type {rnn_type} not supported")
 
         self.dropout = nn.Dropout(dropout)
+        
+        # Add layer normalization if enabled
+        if self.use_layer_norm:
+            self.layer_norm = nn.LayerNorm(n_RNN_cell * 2)
+            
+        # Add attention mechanisms if enabled
+        if self.use_self_attention:
+            self.self_attention = SelfAttention(n_RNN_cell * 2)
+            
+        if self.use_multihead_attention:
+            self.multihead_attention = nn.MultiheadAttention(
+                embed_dim=n_RNN_cell * 2,
+                num_heads=4,
+                dropout=0.1,
+                batch_first=True
+            )
 
         if isinstance(self.nclass, (tuple, list)) and len(self.nclass) > 1:
             # multiple heads
             self.dense = torch.nn.ModuleList([])
             self.sigmoid = nn.Sigmoid()
             self.softmax = nn.Softmax(dim=-1)
+            if self.attention:
+                self.dense_softmax = torch.nn.ModuleList([])
             for current_classes in self.nclass:
                 self.dense.append(nn.Linear(n_RNN_cell * 2, current_classes))
                 if self.attention:
@@ -139,7 +230,8 @@ class CRNN(nn.Module):
                 self.cat_tf = torch.nn.Linear(2 * nb_in, nb_in)
             elif self.aggregation_type == "global":
                 self.shrink_emb = torch.nn.Sequential(
-                    torch.nn.Linear(embedding_size, nb_in), torch.nn.LayerNorm(nb_in)
+                    torch.nn.Linear(embedding_size, nb_in),
+                    torch.nn.LayerNorm(nb_in),
                 )
                 self.cat_tf = torch.nn.Linear(2 * nb_in, nb_in)
             elif self.aggregation_type == "interpolate":
@@ -156,7 +248,7 @@ class CRNN(nn.Module):
         strong = self.sigmoid(strong)
         if classes_mask is not None:
             classes_mask = ~classes_mask[:, None].expand_as(strong)
-        if self.attention in [True, "legacy"]:
+        if self.attention:
             sof = dense_softmax(x)  # [bs, frames, nclass]
             if not pad_mask is None:
                 sof = sof.masked_fill(pad_mask.transpose(1, 2), -1e30)  # mask attention
@@ -205,21 +297,17 @@ class CRNN(nn.Module):
             )
 
     def apply_specaugment(self, x):
-
         if self.training:
-
             timemask = torchaudio.transforms.TimeMasking(
                 self.specaugm_t_l, True, self.specaugm_t_p
             )
-            freqmask = torchaudio.transforms.TimeMasking(
-                self.specaugm_f_l, True, self.specaugm_f_p
-            )  # use time masking also here
-            x = timemask(freqmask(x.transpose(1, -1)).transpose(1, -1))
-
+            freqmask = torchaudio.transforms.FrequencyMasking(  # Changed to proper FrequencyMasking
+                self.specaugm_f_l, self.specaugm_f_p
+            )
+            x = timemask(freqmask(x))
         return x
 
     def forward(self, x, pad_mask=None, embeddings=None, classes_mask=None):
-
         x = self.apply_specaugment(x)
         x = x.transpose(1, 2).unsqueeze(1)
 
@@ -266,7 +354,7 @@ class CRNN(nn.Module):
                 reshape_emb = (
                     self.shrink_emb(embeddings).unsqueeze(1).repeat(1, x.shape[1], 1)
                 )
-
+                x = self.cat_tf(torch.cat((x, reshape_emb), -1))
             elif self.aggregation_type == "interpolate":
                 output_shape = (embeddings.shape[1], x.shape[1])
                 reshape_emb = (
@@ -276,31 +364,53 @@ class CRNN(nn.Module):
                     .squeeze(1)
                     .transpose(1, 2)
                 )
-
+                x = self.cat_tf(torch.cat((x, reshape_emb), -1))
             elif self.aggregation_type == "pool1d":
                 reshape_emb = torch.nn.functional.adaptive_avg_pool1d(
                     embeddings, x.shape[1]
                 ).transpose(1, 2)
+                x = self.cat_tf(torch.cat((x, reshape_emb), -1))
             else:
-                raise NotImplementedError
+                x = self.cat_tf(torch.cat((x, self.shrink_emb(embeddings)
+                        .unsqueeze(1)
+                        .repeat(1, x.shape[1], 1)), -1))
 
-        if self.use_embeddings:
-            if self.dropstep_recurrent and self.training:
-                dropstep = torchaudio.transforms.TimeMasking(
-                    self.dropstep_recurrent_len, True, self.dropstep_recurrent
-                )
-                x = dropstep(x.transpose(1, -1)).transpose(1, -1)
-                reshape_emb = dropstep(reshape_emb.transpose(1, -1)).transpose(1, -1)
-            x = self.cat_tf(self.dropout(torch.cat((x, reshape_emb), -1)))
+        if self.dropstep_recurrent and self.training:
+            dropstep = torchaudio.transforms.TimeMasking(
+                self.dropstep_recurrent_len, True, self.dropstep_recurrent
+            )
+            x = dropstep(x.transpose(1, 2)).transpose(1, 2)
+
+        x_input = self.dropout(x)
+        
+        # Handle different RNN types
+        if self.rnn_type == "BGRU":
+            x_rnn = self.rnn(x_input)
+        else:  # BLSTM
+            x_rnn, _ = self.rnn(x_input)
+        
+        # Apply residual connection if enabled
+        if self.use_residual and x_input.shape[-1] == x_rnn.shape[-1]:
+            x = x_input + x_rnn
         else:
-            if self.dropstep_recurrent and self.training:
-                dropstep = torchaudio.transforms.TimeMasking(
-                    self.dropstep_recurrent_len, True, self.dropstep_recurrent
-                )
-                x = dropstep(x.transpose(1, 2)).transpose(1, 2)
-                x = self.dropout(x)
-
-        x = self.rnn(x)
+            x = x_rnn
+            
+        # Apply layer normalization if enabled
+        if self.use_layer_norm:
+            x = self.layer_norm(x)
+            
+        # Apply self-attention if enabled
+        if self.use_self_attention:
+            x, _ = self.self_attention(x, pad_mask)
+            
+        # Apply multihead attention if enabled
+        if self.use_multihead_attention:
+            if pad_mask is not None:
+                attn_mask = pad_mask.squeeze(1)
+            else:
+                attn_mask = None
+            x, _ = self.multihead_attention(x, x, x, key_padding_mask=attn_mask)
+            
         x = self.dropout(x)
 
         return self._get_logits(x, pad_mask, classes_mask)
