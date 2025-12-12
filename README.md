@@ -110,4 +110,35 @@ pip install h5py
 pip install torchaudio
 ```
 
+
+
+
+Then the next step is to download dataset, you should navigate to DESED directory, and run the file
+`download_data.py`, but before make sure to change the DESED_DIR = '/home/vlad/DESED_task' path to your path.
+
+This code will download all necesarry datasets.
+
+After please run `prepare_dataset.py` as this code will clean all missing files, because Youtueub already deleted most of the files, so this code compares modifies tsv file and checks the files in directory.
+
+Then you can navigate to `recipes/dcase2023_task4_baseline/train_sed.py` this code will run training along with validation and you will get the results.
+
+
+In current setup the datasets are using spectral augmentation in the `getitem` method, and in order to avoid this you must use comment those lines  if not self.test:
+                feats = self.spec_aug(feats
+in every dataset wherrwe we have get item, 
+
+
+this will train the BEATs as in original baseline.
+
+
+
+Result run with baseline and without augmentation
+
+results here
+
+
+Result run with data augmentation
+
+
+
 ---
