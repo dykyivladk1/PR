@@ -140,6 +140,13 @@ Result run with baseline and without augmentation
 
 
 
+Results run with time Stretch
+
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.1842         | 0.1902                     | 0.4116         | 0.4221                     | 48.98 %              | 22.96 %         |
+
+
 Result run with data augmentation Spectral augmentation
 
 
@@ -150,6 +157,9 @@ Result run with data augmentation Spectral augmentation
 
 
 Results run with Mixup
+This applies Mixup data augmentation:
+with some probability, it linearly mixes two random samples in a batch (audio + labels, and features if present) using a random weight λ drawn from a Beta distribution, to improve generalization and reduce overfitting.
+
 
 | PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
 |----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
