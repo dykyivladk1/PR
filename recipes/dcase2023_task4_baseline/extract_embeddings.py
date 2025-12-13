@@ -12,7 +12,6 @@ import yaml
 from desed_task.dataio.datasets import read_audio
 from desed_task.utils.download import download_from_url
 from tqdm import tqdm
-from local.wrapper import PredictionsWrapper
 
 parser = argparse.ArgumentParser("Extract Embeddings with Audioset Pretrained Models")
 
@@ -86,7 +85,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--pretrained_model",
-        default="asit",
+        default="panns",
         help="The pretrained model to use," "choose between panns and ast",
     )
     parser.add_argument("--use_gpu", default="1", help="0 does not use GPU, 1 use GPU")
@@ -101,7 +100,6 @@ if __name__ == "__main__":
         "beats",
         "panns",
         "ast",
-        'asit'
     ], "pretrained model must be either panns or ast"
 
     with open(args.conf_file, "r") as f:
@@ -125,7 +123,8 @@ if __name__ == "__main__":
                 self.target_length = target_length
 
             def __call__(self, waveform):
-                # Reshape or process raw waveform to spectrogram-like data
+                waveform = waveform - torch.mean(waveform, -1)
+
                 fbank = torchaudio.compliance.kaldi.fbank(
                     waveform.unsqueeze(0),
                     htk_compat=True,
@@ -136,11 +135,14 @@ if __name__ == "__main__":
                     dither=0.0,
                     frame_shift=10,
                 )
-                # Pad or reshape to required dimensions (128, 592)
                 fbank = torch.nn.functional.pad(
-                    fbank, (0, 592 - fbank.shape[1]), mode="constant"
-                )[:128, :]
-                return fbank.unsqueeze(0)
+                    fbank,
+                    (0, 0, 0, self.target_length - fbank.shape[0]),
+                    mode="constant",
+                )
+
+                fbank = (fbank - self.audioset_mean) / (self.audioset_std * 2)
+                return fbank
 
         feature_extraction = ASTFeatsExtraction()
         from local.ast.ast_models import ASTModel
@@ -156,26 +158,25 @@ if __name__ == "__main__":
             model_size="base384",
         )
 
-    elif args.pretrained_model == "asit":
-        # feature_extraction = None  # integrated in the model
-        # download_from_url(
-        #     "https://zenodo.org/record/3987831/files/Cnn14_16k_mAP%3D0.438.pth?download=1",
-        #     "./pretrained_models/Cnn14_16k_mAP%3D0.438.pth",
-        # )
+    elif args.pretrained_model == "panns":
+        feature_extraction = None  # integrated in the model
+        download_from_url(
+            "https://zenodo.org/record/3987831/files/Cnn14_16k_mAP%3D0.438.pth?download=1",
+            "./pretrained_models/Cnn14_16k_mAP%3D0.438.pth",
+        )
         # use pannss as additional feature
-        from local.asit.ASIT_wrapper import ASiTWrapper
+        from local.panns.models import Cnn14_16k
 
-        asit = ASiTWrapper()
-        pretrained = PredictionsWrapper(asit, checkpoint="ASIT_strong_1")
+        pretrained = Cnn14_16k(freeze_bn=True, use_specaugm=True)
 
         pretrained.load_state_dict(
-            torch.load("./pretrained_models/asit.pth")["model"],
+            torch.load("./pretrained_models/Cnn14_16k_mAP%3D0.438.pth")["model"],
             strict=False,
         )
     elif args.pretrained_model == "beats":
         feature_extraction = None  # integrated in the model
         # use beats as additional feature
-        from local.asit.BEATs import BEATsModel
+        from local.beats.BEATs import BEATsModel
 
         download_from_url(
             "https://valle.blob.core.windows.net/share/BEATs/BEATs_iter3_plus_AS2M.pt?sv=2020-08-04&st=2023-03-01T07%3A51%3A05Z&se=2033-03-02T07%3A51%3A00Z&sr=c&sp=rl&sig=QJXmSJG9DbMKf48UDIU1MfzIro8HQOf3sqlNXiflY1I%3D",

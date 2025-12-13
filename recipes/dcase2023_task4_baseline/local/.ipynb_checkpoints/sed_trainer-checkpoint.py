@@ -918,7 +918,6 @@ class SEDTask4(pl.LightningModule):
             self.train_data,
             batch_sampler=self.train_sampler,
             num_workers=self.num_workers,
-            collate_fn = self.train_collate_fn if self.train_collate_fn else None
         )
 
         return self.train_loader
