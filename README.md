@@ -1,4 +1,4 @@
-# Practical Work in AI — Sound Event Detection with BEATs and Data Augmentation
+wh# Practical Work in AI — Sound Event Detection with BEATs and Data Augmentation
 
 
 ---
@@ -134,10 +134,27 @@ this will train the BEATs as in original baseline.
 
 Result run with baseline and without augmentation
 
-results here
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.3498         | 0.3595                     | 0.5449         | 0.5624                     | 64.29 %              | 40.73 %         |
 
 
-Result run with data augmentation
+
+Result run with data augmentation Spectral augmentation
+
+
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.2962         | 0.3021                     | 0.4821         | 0.4821                     | 57.86 %              | 34.80 %         |
+
+
+
+Results run with Mixup
+
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.3562         | 0.3630                     | 0.5487         | 0.5564                     | 61.29 %              | 39.27 %         |
+
 
 
 
