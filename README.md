@@ -112,23 +112,110 @@ pip install torchaudio
 
 
 
+## Dataset Preparation and Training Pipeline
 
-Then the next step is to download dataset, you should navigate to DESED directory, and run the file
-`download_data.py`, but before make sure to change the DESED_DIR = '/home/vlad/DESED_task' path to your path.
+### 1. Download the dataset
 
-This code will download all necesarry datasets.
+First, navigate to the **DESED** directory and run:
 
-After please run `prepare_dataset.py` as this code will clean all missing files, because Youtueub already deleted most of the files, so this code compares modifies tsv file and checks the files in directory.
+``` bash
+python download_data.py
+```
 
-Then you can navigate to `recipes/dcase2023_task4_baseline/train_sed.py` this code will run training along with validation and you will get the results.
+Before running the script, **make sure to update the dataset path**
+inside `download_data.py`:
+
+``` python
+DESED_DIR = "/home/vlad/DESED_task"
+```
+
+Change this path to match your local setup.\
+This script will download **all required datasets**.
+
+------------------------------------------------------------------------
+
+### 2. Prepare and clean the dataset
+
+After the download is complete, run:
+
+``` bash
+python prepare_dataset.py
+```
+
+This step is **mandatory** because many YouTube audio files are no
+longer available.\
+The script: - Detects missing audio files - Cleans the corresponding
+entries in the `.tsv` metadata files - Ensures dataset consistency
+before training
+
+------------------------------------------------------------------------
+
+### 3. Run training
+
+Navigate to the baseline training script:
+
+``` bash
+cd recipes/dcase2023_task4_baseline
+python train_sed.py
+```
+
+This script performs: - Training - Validation - Evaluation\
+and outputs all metrics reported in the experiments.
+
+------------------------------------------------------------------------
+
+### 4. Disable Spectral Augmentation (optional)
+
+In the current setup, **spectral augmentation is enabled by default**
+inside the dataset `__getitem__` method.
+
+To train **BEATs exactly as in the original baseline (without
+augmentation)**, comment out the following lines **in every dataset
+class where `__getitem__` is implemented**:
+
+``` python
+if not self.test:
+    feats = self.spec_aug(feats)
+```
+
+After disabling these lines, the model will be trained **without
+spectral augmentation**, matching the original baseline configuration.
 
 
-In current setup the datasets are using spectral augmentation in the `getitem` method, and in order to avoid this you must use comment those lines  if not self.test:
-                feats = self.spec_aug(feats
-in every dataset wherrwe we have get item, 
 
+## 5. Disable Mixup Augmentation (optional)
 
-this will train the BEATs as in original baseline.
+Mixup augmentation is applied via a custom `collate_fn` during training.
+
+To train **without Mixup**, open:
+```
+recipes/dcase2023_task4_baseline/train_sed.py
+```
+
+Locate the `SEDTask4` initialization:
+```python
+desed_training = SEDTask4(
+    config,
+    encoder=encoder,
+    sed_student=sed_student,
+    opt=opt,
+    train_data=train_dataset,
+    valid_data=valid_dataset,
+    test_data=test_dataset,
+    train_sampler=batch_sampler,
+    scheduler=exp_scheduler,
+    fast_dev_run=fast_dev_run,
+    evaluation=evaluation,
+    train_collate_fn=train_collate_fn,  # Pass collate function with Mixup
+)
+```
+
+To disable Mixup, simply comment out the `train_collate_fn` line:
+```python
+# train_collate_fn=train_collate_fn
+```
+
+After this change, the model will be trained without Mixup augmentation, using the standard batch collation.
 
 
 
