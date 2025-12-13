@@ -218,57 +218,53 @@ To disable Mixup, simply comment out the `train_collate_fn` line:
 After this change, the model will be trained without Mixup augmentation, using the standard batch collation.
 
 
+## Experimental Results
 
-Result run with baseline and without augmentation
-
-| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
-|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
-| 0.3498         | 0.3595                     | 0.5449         | 0.5624                     | 64.29 %              | 40.73 %         |
-
-
-
-Results run with time Stretch
+### Baseline (No Augmentation)
 
 | PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
 |----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
-| 0.1842         | 0.1902                     | 0.4116         | 0.4221                     | 48.98 %              | 22.96 %         |
+| 0.3498         | 0.3595                     | 0.5449         | 0.5624                     | 64.29%               | 40.73%          |
 
+---
 
-Result run with data augmentation Spectral augmentation
-
-
-| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
-|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
-| 0.2962         | 0.3021                     | 0.4821         | 0.4821                     | 57.86 %              | 34.80 %         |
-
-
-
-Results run with Mixup
-This applies Mixup data augmentation:
-with some probability, it linearly mixes two random samples in a batch (audio + labels, and features if present) using a random weight λ drawn from a Beta distribution, to improve generalization and reduce overfitting.
-
+### Results with Time Stretch Augmentation
 
 | PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
 |----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
-| 0.3562         | 0.3630                     | 0.5487         | 0.5564                     | 61.29 %              | 39.27 %         |
+| 0.1842         | 0.1902                     | 0.4116         | 0.4221                     | 48.98%               | 22.96%          |
 
+---
 
+### Results with Spectral Augmentation
 
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.2962         | 0.3021                     | 0.4821         | 0.4821                     | 57.86%               | 34.80%          |
 
+---
 
-Conclusion
+### Results with Mixup Augmentation
 
-The experiments show that data augmentation has a significant and method-dependent impact on Sound Event Detection performance.
+**Mixup** applies data augmentation by linearly mixing two random samples in a batch (audio + labels, and features if present) with some probability, using a random weight λ drawn from a Beta distribution. This improves generalization and reduces overfitting.
 
-Baseline (no augmentation) provides a strong and stable reference, achieving the best overall balance across PSDS and F1 metrics.
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.3562         | 0.3630                     | 0.5487         | 0.5564                     | 61.29%               | 39.27%          |
 
-Time Stretch augmentation clearly degrades performance across all metrics, indicating that temporal distortion harms event alignment and temporal precision for this task.
+---
 
-Spectral augmentation improves over Time Stretch and recovers part of the baseline performance, suggesting better robustness to frequency-domain variations, but it still does not surpass the baseline.
+## Conclusion
 
-Mixup augmentation delivers the best overall improvement, slightly outperforming the baseline in PSDS-scenario1 and maintaining competitive PSDS-scenario2 and F1 scores. This indicates improved generalization without severe loss of temporal accuracy.
+The experiments demonstrate that **data augmentation has a significant and method-dependent impact** on Sound Event Detection performance:
 
-Overall, Mixup is the most effective augmentation strategy in this setup, while Time Stretch should be avoided. Spectral augmentation provides moderate benefits but is less effective than Mixup.
+- **Baseline (no augmentation)** provides a strong and stable reference, achieving the best overall balance across PSDS and F1 metrics.
+
+- **Time Stretch augmentation** clearly degrades performance across all metrics, indicating that temporal distortion harms event alignment and temporal precision for this task.
+
+- **Spectral augmentation** improves over Time Stretch and recovers part of the baseline performance, suggesting better robustness to frequency-domain variations, but it still does not surpass the baseline.
+
+- **Mixup augmentation** delivers the best overall improvement, slightly outperforming the baseline in PSDS-scenario1 and maintaining competitive PSDS-scenario2 and F1 scores. This indicates improved generalization without severe loss of temporal accuracy.
 
 
 
