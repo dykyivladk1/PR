@@ -168,4 +168,21 @@ with some probability, it linearly mixes two random samples in a batch (audio + 
 
 
 
+
+Conclusion
+
+The experiments show that data augmentation has a significant and method-dependent impact on Sound Event Detection performance.
+
+Baseline (no augmentation) provides a strong and stable reference, achieving the best overall balance across PSDS and F1 metrics.
+
+Time Stretch augmentation clearly degrades performance across all metrics, indicating that temporal distortion harms event alignment and temporal precision for this task.
+
+Spectral augmentation improves over Time Stretch and recovers part of the baseline performance, suggesting better robustness to frequency-domain variations, but it still does not surpass the baseline.
+
+Mixup augmentation delivers the best overall improvement, slightly outperforming the baseline in PSDS-scenario1 and maintaining competitive PSDS-scenario2 and F1 scores. This indicates improved generalization without severe loss of temporal accuracy.
+
+Overall, Mixup is the most effective augmentation strategy in this setup, while Time Stretch should be avoided. Spectral augmentation provides moderate benefits but is less effective than Mixup.
+
+
+
 ---
