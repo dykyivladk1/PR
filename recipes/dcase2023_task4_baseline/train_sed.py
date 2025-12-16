@@ -31,18 +31,15 @@ def collate_fn_with_mixup(batch, mixup=None):
     """
     Collate function with optional mixup augmentation
     """
-    # Apply mixup if provided and we're training
     if mixup is not None:
         batch = mixup(batch)
     
-    # Standard collate - stack tensors
     mixtures = torch.stack([item[0] for item in batch])
     labels = torch.stack([item[1] for item in batch])
     padded_indx = [item[2] for item in batch]
     
     result = [mixtures, labels, padded_indx]
     
-    # Handle additional elements (feats, filenames, embeddings, etc.)
     if len(batch[0]) > 3:
         for i in range(3, len(batch[0])):
             if isinstance(batch[0][i], torch.Tensor):
