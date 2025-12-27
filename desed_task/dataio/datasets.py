@@ -8,7 +8,11 @@ import numpy as np
 import pandas as pd
 import torch
 import torchaudio
+import torchaudio.transforms as T
 from torch.utils.data import Dataset
+
+
+from .augmentation import augment_time_stretch, filter_augment
 
 
 def to_mono(mixture, random_ch=False):
@@ -90,6 +94,12 @@ class StronglyAnnotatedSet(Dataset):
         embedding_type=None,
         mask_events_other_than=None,
         test=False,
+        use_filter_aug=True,
+        filter_aug_prob=0.5,
+        use_spec_aug=False,
+        spec_aug_prob=0.5,
+        use_time_stretch=False,
+        time_stretch_prob=0.5,
     ):
         self.encoder = encoder
         self.fs = fs
@@ -101,7 +111,20 @@ class StronglyAnnotatedSet(Dataset):
         self.embeddings_hdf5_file = embeddings_hdf5_file
         self.embedding_type = embedding_type
         self.test = test
+        self.use_filter_aug = use_filter_aug
+        self.filter_aug_prob = filter_aug_prob
+        self.use_spec_aug = use_spec_aug
+        self.spec_aug_prob = spec_aug_prob
+        self.use_time_stretch = use_time_stretch
+        self.time_stretch_prob = time_stretch_prob
 
+        # augmentation
+        if use_spec_aug:
+            self.spec_aug = torch.nn.Sequential(
+                T.FrequencyMasking(freq_mask_param=8),
+                T.TimeMasking(time_mask_param=20)
+            )
+        
         # we mask events that are incompatible with the current setting
         if mask_events_other_than is not None:
             # fetch indexes to mask
@@ -186,38 +209,57 @@ class StronglyAnnotatedSet(Dataset):
 
     def __getitem__(self, item):
         c_ex = self.examples[self.examples_list[item]]
+    
         mixture, onset_s, offset_s, padded_indx = read_audio(
-            c_ex["mixture"], self.multisrc, self.random_channel, self.pad_to, self.test,
+            c_ex["mixture"],
+            self.multisrc,
+            self.random_channel,
+            self.pad_to,
+            self.test,
         )
-
-        # labels
+    
         labels = c_ex["events"]
-
-        # to steps
         labels_df = pd.DataFrame(labels)
         labels_df = process_labels(labels_df, onset_s, offset_s)
-
-        # check if labels exists:
+    
+        # Apply time stretch augmentation
+        if not self.test and self.use_time_stretch and random.random() < self.time_stretch_prob:
+            mixture, factor = augment_time_stretch(mixture, self.fs)
+    
+            if len(labels_df):
+                labels_df = labels_df.copy()
+                labels_df["onset"]  = labels_df["onset"]  * factor
+                labels_df["offset"] = labels_df["offset"] * factor
+    
         if not len(labels_df):
             max_len_targets = self.encoder.n_frames
             strong = torch.zeros(max_len_targets, len(self.encoder.labels)).float()
         else:
             strong = self.encoder.encode_strong_df(labels_df)
             strong = torch.from_numpy(strong).float()
-
+    
         out_args = [mixture, strong.transpose(0, 1), padded_indx]
-
+    
         if self.feats_pipeline is not None:
-            # use this function to extract features in the dataloader and apply possibly some data augm
             feats = self.feats_pipeline(mixture)
+            
+            # Apply spec augmentation during training
+            if not self.test and self.use_spec_aug and random.random() < self.spec_aug_prob:
+                feats = self.spec_aug(feats.unsqueeze(0)).squeeze(0)
+            
+            # Apply filter augmentation during training
+            if not self.test and self.use_filter_aug and random.random() < self.filter_aug_prob:
+                feats = filter_augment(feats, db_range=(-6, 6), band_range=(3, 6), mode='linear')
+            
             out_args.append(feats)
+    
         if self.return_filename:
             out_args.append(c_ex["mixture"])
-
+    
         if self.embeddings_hdf5_file is not None:
             name = Path(c_ex["mixture"]).stem
             index = self.ex2emb_idx[name]
-
+    
             if self.embedding_type == "global":
                 embeddings = torch.from_numpy(
                     self.hdf5_file["global_embeddings"][index]
@@ -228,12 +270,12 @@ class StronglyAnnotatedSet(Dataset):
                 ).float()
             else:
                 raise NotImplementedError
-
+    
             out_args.append(embeddings)
-
+    
         if self.mask_events_other_than is not None:
             out_args.append(self.mask_events_other_than)
-
+    
         return out_args
 
 
@@ -253,6 +295,12 @@ class WeakSet(Dataset):
         embedding_type=None,
         mask_events_other_than=None,
         test=False,
+        use_filter_aug=True,
+        filter_aug_prob=0.5,
+        use_spec_aug=False,
+        spec_aug_prob=0.5,
+        use_time_stretch=True,
+        time_stretch_prob=0.5,
     ):
         self.encoder = encoder
         self.fs = fs
@@ -265,7 +313,20 @@ class WeakSet(Dataset):
         self.embedding_type = embedding_type
         self.mask_events_other_than = mask_events_other_than
         self.test = test
+        self.use_filter_aug = use_filter_aug
+        self.filter_aug_prob = filter_aug_prob
+        self.use_spec_aug = use_spec_aug
+        self.spec_aug_prob = spec_aug_prob
+        self.use_time_stretch = use_time_stretch
+        self.time_stretch_prob = time_stretch_prob
 
+        # augmentation
+        if use_spec_aug:
+            self.spec_aug = torch.nn.Sequential(
+                T.FrequencyMasking(freq_mask_param=8),
+                T.TimeMasking(time_mask_param=20)
+            )
+        
         if mask_events_other_than is not None:
             # fetch indexes to mask
             self.mask_events_other_than = torch.ones(len(encoder.labels))
@@ -321,33 +382,47 @@ class WeakSet(Dataset):
     def __getitem__(self, item):
         file = self.examples_list[item]
         c_ex = self.examples[file]
-
+    
         mixture, _, _, padded_indx = read_audio(
             c_ex["mixture"], self.multisrc, self.random_channel, self.pad_to, self.test
         )
-
-        # labels
+    
+        # Apply time stretch augmentation
+        if not self.test and self.use_time_stretch and random.random() < self.time_stretch_prob:
+            mixture, _ = augment_time_stretch(mixture, self.fs)
+    
         labels = c_ex["events"]
-        # check if labels exists:
+    
         max_len_targets = self.encoder.n_frames
         weak = torch.zeros(max_len_targets, len(self.encoder.labels))
         if len(labels):
             weak_labels = self.encoder.encode_weak(labels)
             weak[0, :] = torch.from_numpy(weak_labels).float()
-
+    
         out_args = [mixture, weak.transpose(0, 1), padded_indx]
-
+    
         if self.feats_pipeline is not None:
+            # use this function to extract features in the dataloader and apply possibly some data augm
             feats = self.feats_pipeline(mixture)
-            out_args.append(feats)
+            
+            # Apply spec augmentation during training
+            if not self.test and self.use_spec_aug and random.random() < self.spec_aug_prob:
+                feats = self.spec_aug(feats.unsqueeze(0)).squeeze(0)
 
+            
+            # Apply filter augmentation during training
+            if not self.test and self.use_filter_aug and random.random() < self.filter_aug_prob:
+                feats = filter_augment(feats, db_range=(-6, 6), band_range=(3, 6), mode='linear')
+            
+            out_args.append(feats)
+    
         if self.return_filename:
             out_args.append(c_ex["mixture"])
-
+    
         if self.embeddings_hdf5_file is not None:
             name = Path(c_ex["mixture"]).stem
             index = self.ex2emb_idx[name]
-
+    
             if self.embedding_type == "global":
                 embeddings = torch.from_numpy(
                     self.hdf5_file["global_embeddings"][index]
@@ -358,12 +433,12 @@ class WeakSet(Dataset):
                 ).float()
             else:
                 raise NotImplementedError
-
+    
             out_args.append(embeddings)
-
+    
         if self.mask_events_other_than is not None:
             out_args.append(self.mask_events_other_than)
-
+    
         return out_args
 
 
@@ -382,6 +457,12 @@ class UnlabeledSet(Dataset):
         embedding_type=None,
         mask_events_other_than=None,
         test=False,
+        use_filter_aug=True,
+        filter_aug_prob=0.5,
+        use_spec_aug=False,
+        spec_aug_prob=0.5,
+        use_time_stretch=True,
+        time_stretch_prob=0.5,
     ):
         self.encoder = encoder
         self.fs = fs
@@ -394,6 +475,13 @@ class UnlabeledSet(Dataset):
         self.embeddings_hdf5_file = embeddings_hdf5_file
         self.embedding_type = embedding_type
         self.test = test
+        self.use_filter_aug = use_filter_aug
+        self.filter_aug_prob = filter_aug_prob
+        self.use_spec_aug = use_spec_aug
+        self.spec_aug_prob = spec_aug_prob
+        self.use_time_stretch = use_time_stretch
+        self.time_stretch_prob = time_stretch_prob
+        
         assert embedding_type in [
             "global",
             "frame",
@@ -402,6 +490,13 @@ class UnlabeledSet(Dataset):
             embedding_type
         )
 
+        # augmentation
+        if use_spec_aug:
+            self.spec_aug = torch.nn.Sequential(
+                T.FrequencyMasking(freq_mask_param=8),
+                T.TimeMasking(time_mask_param=20)
+            )
+        
         self.mask_events_other_than = mask_events_other_than
 
         if mask_events_other_than is not None:
@@ -437,28 +532,44 @@ class UnlabeledSet(Dataset):
         if self._opened_hdf5 is None:
             self._opened_hdf5 = h5py.File(self.embeddings_hdf5_file, "r")
         return self._opened_hdf5
-
+    
     def __getitem__(self, item):
         c_ex = self.examples[item]
-
+    
         mixture, _, _, padded_indx = read_audio(
             c_ex, self.multisrc, self.random_channel, self.pad_to, self.test
         )
-
+    
+        # Apply time stretch augmentation
+        if not self.test and self.use_time_stretch and random.random() < self.time_stretch_prob:
+            mixture, _ = augment_time_stretch(mixture, self.fs)
+    
         max_len_targets = self.encoder.n_frames
         strong = torch.zeros(max_len_targets, len(self.encoder.labels)).float()
+    
         out_args = [mixture, strong.transpose(0, 1), padded_indx]
+    
         if self.feats_pipeline is not None:
             feats = self.feats_pipeline(mixture)
-            out_args.append(feats)
+            
+            # Apply spec augmentation during training
+            if not self.test and self.use_spec_aug and random.random() < self.spec_aug_prob:
+                feats = self.spec_aug(feats.unsqueeze(0)).squeeze(0)
 
+            
+            # Apply filter augmentation during training
+            if not self.test and self.use_filter_aug and random.random() < self.filter_aug_prob:
+                feats = filter_augment(feats, db_range=(-6, 6), band_range=(3, 6), mode='linear')
+            
+            out_args.append(feats)
+    
         if self.return_filename:
             out_args.append(c_ex)
-
+    
         if self.embeddings_hdf5_file is not None:
             name = Path(c_ex).stem
             index = self.ex2emb_idx[name]
-
+    
             if self.embedding_type == "global":
                 embeddings = torch.from_numpy(
                     self.hdf5_file["global_embeddings"][index]
@@ -469,10 +580,10 @@ class UnlabeledSet(Dataset):
                 ).float()
             else:
                 raise NotImplementedError
-
+    
             out_args.append(embeddings)
-
+    
         if self.mask_events_other_than is not None:
             out_args.append(self.mask_events_other_than)
-
+    
         return out_args
