@@ -159,60 +159,7 @@ This script performs: - Training - Validation - Evaluation\
 and outputs all metrics reported in the experiments.
 
 ------------------------------------------------------------------------
-
-### 4. Disable Spectral Augmentation (optional)
-
-In the current setup, **spectral augmentation is enabled by default**
-inside the dataset `__getitem__` method.
-
-To train **BEATs exactly as in the original baseline (without
-augmentation)**, comment out the following lines **in every dataset
-class where `__getitem__` is implemented**:
-
-``` python
-if not self.test:
-    feats = self.spec_aug(feats)
-```
-
-After disabling these lines, the model will be trained **without
-spectral augmentation**, matching the original baseline configuration.
-
-
-
-## 5. Disable Mixup Augmentation (optional)
-
-Mixup augmentation is applied via a custom `collate_fn` during training.
-
-To train **without Mixup**, open:
-```
-recipes/dcase2023_task4_baseline/train_sed.py
-```
-
-Locate the `SEDTask4` initialization:
-```python
-desed_training = SEDTask4(
-    config,
-    encoder=encoder,
-    sed_student=sed_student,
-    opt=opt,
-    train_data=train_dataset,
-    valid_data=valid_dataset,
-    test_data=test_dataset,
-    train_sampler=batch_sampler,
-    scheduler=exp_scheduler,
-    fast_dev_run=fast_dev_run,
-    evaluation=evaluation,
-    train_collate_fn=train_collate_fn,  # Pass collate function with Mixup
-)
-```
-
-To disable Mixup, simply comment out the `train_collate_fn` line:
-```python
-# train_collate_fn=train_collate_fn
-```
-
-After this change, the model will be trained without Mixup augmentation, using the standard batch collation.
-
+# TODO python train_sed with attributes
 
 ## Experimental Results
 
