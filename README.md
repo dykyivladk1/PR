@@ -1,4 +1,4 @@
-wh# Practical Work in AI — Sound Event Detection with BEATs and Data Augmentation
+Practical Work in AI — Sound Event Detection with BEATs and Data Augmentation
 
 
 ---
