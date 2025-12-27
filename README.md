@@ -25,11 +25,16 @@ The main goal of this work is to **reproduce the official DCASE 2023 baseline us
 
 ## Experimental Setup
 
-### Model
-- The system follows the **official DCASE 2023 baseline architecture**.
-- A **pretrained BEATs transformer** is used as a **frozen embedding extractor**.
-- No fine-tuning of the transformer is performed.
-- Only the CRNN classifier is trained.
+
+### Model Architecture
+
+- The system follows the **official DCASE 2023 baseline CRNN architecture**.
+- The model consists of:
+  - Convolutional layers for time–frequency feature extraction
+  - Recurrent layers for temporal modeling
+  - A frame-level classifier for sound event detection
+- **No pretrained transformer embeddings are used**
+- The **CRNN model is trained end-to-end**
 
 
 ---
@@ -68,20 +73,12 @@ Dataset preparation follows the official baseline instructions and is handled us
 
 The main experimental variable in this project is **data augmentation**.
 
-Two training configurations are compared:
+Evaluated augmentation techniques:
 
-### 1. Baseline (No Augmentation)
-- Original DCASE 2023 baseline setup
-- No augmentation applied
-
-### 2. Baseline + Data Augmentation
-- Data augmentation applied **only during training**
-- Validation and test data remain unchanged
-- The BEATs transformer remains frozen
-
-At the current stage, **spectrogram-based augmentation** is used.  
-Additional augmentation techniques (e.g. waveform-level or alternative spectrogram augmentations) may be explored in later experiments.
-
+- **Time Stretch**
+- **Spectral Augmentation**
+- **Filter Augmentation**
+- **Mixup (optional)**
 
 ---
 
