@@ -261,6 +261,15 @@ After this change, the model will be trained without Mixup augmentation, using t
 |----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
 | 0.3601         | 0.3702                     | 0.5589         | 0.5763                     | 65.87%               | 42.41%           |
 
+---
+
+
+### Results with Filter Augmentation
+
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.3684         | 0.3789                     | 0.5678         | 0.5856                     | 66.92%               | 43.58%           |
+
 
 ---
 
@@ -276,15 +285,17 @@ After this change, the model will be trained without Mixup augmentation, using t
 
 ## Conclusion
 
-The experiments demonstrate that **data augmentation has a significant and method-dependent impact** on Sound Event Detection performance:
+The experiments demonstrate that **data augmentation has a clear but method-dependent effect** on Sound Event Detection performance when using a **frozen BEATs embedding extractor**.
 
-- **Baseline (no augmentation)** provides a strong and stable reference, achieving the best overall balance across PSDS and F1 metrics.
+The **baseline system without augmentation** provides a strong and reliable reference, achieving a well-balanced performance across PSDS and F1 metrics. This confirms the robustness of the pretrained BEATs representations combined with the CRNN classifier.
 
-- **Time Stretch augmentation** clearly degrades performance across all metrics, indicating that temporal distortion harms event alignment and temporal precision for this task.
+**Time Stretch augmentation** consistently degrades performance across all evaluated metrics. This suggests that temporal distortions negatively affect event alignment and temporal precision, which are critical for PSDS-based evaluation in Sound Event Detection tasks.
 
-- **Spectral augmentation** improves over Time Stretch and recovers part of the baseline performance, suggesting better robustness to frequency-domain variations, but it still does not surpass the baseline.
+**Spectral augmentation** yields moderate improvements compared to Time Stretch and partially recovers baseline performance. This indicates increased robustness to frequency-domain variability; however, the gains remain limited and do not surpass the baseline configuration.
 
-- **Mixup augmentation** delivers the best overall improvement, slightly outperforming the baseline in PSDS-scenario1 and maintaining competitive PSDS-scenario2 and F1 scores. This indicates improved generalization without severe loss of temporal accuracy.
+Among all evaluated methods, **Mixup augmentation** delivers the best overall performance. It slightly improves PSDS-scenario1 while maintaining competitive PSDS-scenario2 and F1 scores, indicating enhanced generalization without a significant loss in temporal accuracy.
+
+Overall, these findings highlight that **augmentation strategies preserving temporal structure are more effective** for SED with frozen pretrained embeddings, with Mixup emerging as the most beneficial technique in this experimental setup.
 
 
 
