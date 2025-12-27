@@ -227,19 +227,4 @@ and outputs all metrics reported in the experiments.
 ---
 
 ## Conclusion
-
-The experiments demonstrate that **data augmentation has a clear but method-dependent effect** on Sound Event Detection performance when using a **frozen BEATs embedding extractor**.
-
-The **baseline system without augmentation** provides a strong and reliable reference, achieving a well-balanced performance across PSDS and F1 metrics. This confirms the robustness of the pretrained BEATs representations combined with the CRNN classifier.
-
-**Time Stretch augmentation** consistently degrades performance across all evaluated metrics. This suggests that temporal distortions negatively affect event alignment and temporal precision, which are critical for PSDS-based evaluation in Sound Event Detection tasks.
-
-**Spectral augmentation** yields moderate improvements compared to Time Stretch and partially recovers baseline performance. This indicates increased robustness to frequency-domain variability; however, the gains remain limited and do not surpass the baseline configuration.
-
-Among all evaluated methods, **Mixup augmentation** delivers the best overall performance. It slightly improves PSDS-scenario1 while maintaining competitive PSDS-scenario2 and F1 scores, indicating enhanced generalization without a significant loss in temporal accuracy.
-
-Overall, these findings highlight that **augmentation strategies preserving temporal structure are more effective** for SED with frozen pretrained embeddings, with Mixup emerging as the most beneficial technique in this experimental setup.
-
-
-
----
+#TODO Conclusion
