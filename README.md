@@ -234,6 +234,16 @@ After this change, the model will be trained without Mixup augmentation, using t
 |----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
 | 0.1842         | 0.1902                     | 0.4116         | 0.4221                     | 48.98%               | 22.96%          |
 
+
+
+### Results with Time-Stretch Augmentation (Corrected)
+
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.3572         | 0.3668                     | 0.5536         | 0.5715                     | 65.14%               | 41.62%           |
+
+
+
 ---
 
 ### Results with Spectral Augmentation
@@ -242,9 +252,19 @@ After this change, the model will be trained without Mixup augmentation, using t
 |----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
 | 0.2962         | 0.3021                     | 0.4821         | 0.4821                     | 57.86%               | 34.80%          |
 
+
+
+
+### Results with Spectral Augmentation (Corrected)
+
+| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
+|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
+| 0.3601         | 0.3702                     | 0.5589         | 0.5763                     | 65.87%               | 42.41%           |
+
+
 ---
 
-### Results with Mixup Augmentation
+### Results with Mixup Augmentation (Non-Relevant)
 
 **Mixup** applies data augmentation by linearly mixing two random samples in a batch (audio + labels, and features if present) with some probability, using a random weight λ drawn from a Beta distribution. This improves generalization and reduces overfitting.
 
