@@ -1,5 +1,4 @@
-Practical Work in AI — Sound Event Detection with BEATs and Data Augmentation
-
+# Practical Work in AI — Sound Event Detection with CRNN and Data Augmentation
 
 ---
 
@@ -8,7 +7,7 @@ Practical Work in AI — Sound Event Detection with BEATs and Data Augmentation
 This repository contains my **Practical Work in AI** at **Johannes Kepler University Linz (JKU)**.  
 The project is based on the **DCASE 2023 Task 4: Sound Event Detection with Weak Labels and Synthetic Soundscapes** baseline system.
 
-The main goal of this work is to **reproduce the official DCASE 2023 baseline using a pretrained BEATs transformer** and to **analyze the impact of data augmentation techniques on Sound Event Detection performance**.
+The main goal of this work is to **reproduce the official DCASE 2023 baseline using a CRNN-based Sound Event Detection model** and to **analyze the impact of different data augmentation techniques on Sound Event Detection performance**.
 
 ---
 
@@ -16,9 +15,9 @@ The main goal of this work is to **reproduce the official DCASE 2023 baseline us
 
 - **Task:** Sound Event Detection (SED)
 - **Dataset:** DCASE 2023 Task 4
-- **Baseline system:** DCASE 2023 Task 4 baseline
-- **Embedding extractor:** Pretrained **BEATs** transformer (frozen)
-- **Classifier:** CRNN (baseline architecture)
+- **Baseline system:** Official DCASE 2023 Task 4 baseline
+- **Model:** CRNN (Convolutional Recurrent Neural Network)
+- **Training paradigm:** Weak + synthetic supervision
 - **Metric:** PSDS-1
 - **Focus:** Effect of **data augmentation** on SED performance
 
