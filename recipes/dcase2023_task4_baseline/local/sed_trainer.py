@@ -1,979 +1,520 @@
+import argparse
 import os
 import random
 import warnings
-from copy import deepcopy
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import sed_scores_eval
 import torch
-import torchmetrics
-from codecarbon import OfflineEmissionsTracker
-from desed_task.data_augm import mixup
-from desed_task.evaluation.evaluation_measures import (
-    compute_per_intersection_macro_f1, compute_psds_from_operating_points,
-    compute_psds_from_scores)
-from desed_task.utils.scaler import TorchScaler
-from torchaudio.transforms import AmplitudeToDB, MelSpectrogram
+import torchaudio
+import yaml
+from desed_task.dataio import ConcatDatasetBatchSampler
+from desed_task.dataio.datasets import (StronglyAnnotatedSet, UnlabeledSet,
+                                        WeakSet)
+from desed_task.nnet.CRNN import CRNN
+from desed_task.utils.encoder import ManyHotEncoder
+from desed_task.utils.schedulers import ExponentialWarmup
+from local.classes_dict import classes_labels
+from local.resample_folder import resample_folder
+from local.sed_trainer import SEDTask4
+from local.utils import calculate_macs, generate_tsv_wav_durations
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
 
-from .utils import batched_decode_preds, log_sedeval_metrics
-from .mixup import Mixup
+from functools import partial
+
+feature_extraction = torch.nn.Sequential(
+    torchaudio.transforms.MelSpectrogram(
+        sample_rate=16000,
+        n_fft=1024,
+        hop_length=320,
+        n_mels=64,
+    ),
+    torchaudio.transforms.AmplitudeToDB(),
+)
 
 
-class SEDTask4(pl.LightningModule):
-    """Pytorch lightning module for the SED 2021 baseline
-    Args:
-        hparams: dict, the dictionary to be used for the current experiment/
-        encoder: ManyHotEncoder object, object to encode and decode labels.
-        sed_student: torch.Module, the student model to be trained. The teacher model will be
-        opt: torch.optimizer.Optimizer object, the optimizer to be used
-        train_data: torch.utils.data.Dataset subclass object, the training data to be used.
-        valid_data: torch.utils.data.Dataset subclass object, the validation data to be used.
-        test_data: torch.utils.data.Dataset subclass object, the test data to be used.
-        train_sampler: torch.utils.data.Sampler subclass object, the sampler to be used in the training dataloader.
-        scheduler: BaseScheduler subclass object, the scheduler to be used.
-                   This is used to apply ramp-up during training for example.
-        fast_dev_run: bool, whether to launch a run with only one batch for each set, this is for development purpose,
-            to test the code runs.
-    """
-
-    def __init__(
-        self,
-        hparams,
-        encoder,
-        sed_student,
-        opt=None,
-        train_data=None,
-        valid_data=None,
-        test_data=None,
-        train_sampler=None,
-        scheduler=None,
-        fast_dev_run=False,
-        evaluation=False,
-        sed_teacher=None,
-        train_collate_fn = None
-    ):
-        super(SEDTask4, self).__init__()
-        self.hparams.update(hparams)
-
-        self.encoder = encoder
-        self.sed_student = sed_student
-        if sed_teacher is None:
-            self.sed_teacher = deepcopy(sed_student)
-        else:
-            self.sed_teacher = sed_teacher
-        self.opt = opt
-        self.train_data = train_data
-        self.valid_data = valid_data
-        self.test_data = test_data
-        self.train_sampler = train_sampler
-        self.scheduler = scheduler
-        self.fast_dev_run = fast_dev_run
-        self.evaluation = evaluation
-        self.train_collate_fn = train_collate_fn
-
-        if self.fast_dev_run:
-            self.num_workers = 1
-        else:
-            self.num_workers = self.hparams["training"]["num_workers"]
-
-        feat_params = self.hparams["feats"]
-        self.mel_spec = MelSpectrogram(
-            sample_rate=feat_params["sample_rate"],
-            n_fft=feat_params["n_window"],
-            win_length=feat_params["n_window"],
-            hop_length=feat_params["hop_length"],
-            f_min=feat_params["f_min"],
-            f_max=feat_params["f_max"],
-            n_mels=feat_params["n_mels"],
-            window_fn=torch.hamming_window,
-            wkwargs={"periodic": False},
-            power=1,
-        )
-
-        for param in self.sed_teacher.parameters():
-            param.detach_()
-
-        # instantiating losses
-        self.supervised_loss = torch.nn.BCELoss()
-        if hparams["training"]["self_sup_loss"] == "mse":
-            self.selfsup_loss = torch.nn.MSELoss()
-        elif hparams["training"]["self_sup_loss"] == "bce":
-            self.selfsup_loss = torch.nn.BCELoss()
-        else:
-            raise NotImplementedError
-
-        # for weak labels we simply compute f1 score
-        self.get_weak_student_f1_seg_macro = (
-            torchmetrics.classification.f_beta.MultilabelF1Score(
-                len(self.encoder.labels),
-                average="macro"
-            )
-        )
-
-        self.get_weak_teacher_f1_seg_macro = (
-            torchmetrics.classification.f_beta.MultilabelF1Score(
-                len(self.encoder.labels),
-                average="macro"
-            )
-        )
-
-        self.scaler = self._init_scaler()
-        # buffer for event based scores which we compute using sed-eval
-
-        self.val_buffer_student_synth = {
-            k: pd.DataFrame() for k in self.hparams["training"]["val_thresholds"]
-        }
-        self.val_buffer_teacher_synth = {
-            k: pd.DataFrame() for k in self.hparams["training"]["val_thresholds"]
-        }
-
-        self.val_buffer_student_test = {
-            k: pd.DataFrame() for k in self.hparams["training"]["val_thresholds"]
-        }
-        self.val_buffer_teacher_test = {
-            k: pd.DataFrame() for k in self.hparams["training"]["val_thresholds"]
-        }
-        self.val_scores_postprocessed_buffer_student_synth = {}
-        self.val_scores_postprocessed_buffer_teacher_synth = {}
-
-        test_n_thresholds = self.hparams["training"]["n_test_thresholds"]
-        test_thresholds = np.arange(
-            1 / (test_n_thresholds * 2), 1, 1 / test_n_thresholds
-        )
-        self.test_psds_buffer_student = {k: pd.DataFrame() for k in test_thresholds}
-        self.test_psds_buffer_teacher = {k: pd.DataFrame() for k in test_thresholds}
-        self.decoded_student_05_buffer = pd.DataFrame()
-        self.decoded_teacher_05_buffer = pd.DataFrame()
-        self.test_scores_raw_buffer_student = {}
-        self.test_scores_raw_buffer_teacher = {}
-        self.test_scores_postprocessed_buffer_student = {}
-        self.test_scores_postprocessed_buffer_teacher = {}
-
-    _exp_dir = None
-
-    @property
-    def exp_dir(self):
-        if self._exp_dir is None:
-            try:
-                self._exp_dir = self.logger.log_dir
-            except Exception as e:
-                self._exp_dir = self.hparams["log_dir"]
-        return self._exp_dir
-
-    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
-        scheduler.step()
-
-    def on_train_start(self) -> None:
-        os.makedirs(os.path.join(self.exp_dir, "training_codecarbon"), exist_ok=True)
-        self.tracker_train = OfflineEmissionsTracker(
-            "DCASE Task 4 SED TRAINING",
-            output_dir=os.path.join(self.exp_dir, "training_codecarbon"),
-            log_level="warning",
-            country_iso_code="FRA",
-        )
-        self.tracker_train.start()
-
-        # Remove for debugging. Those warnings can be ignored during training otherwise.
-        # to_ignore = []
-        to_ignore = [
-            ".*Trying to infer the `batch_size` from an ambiguous collection.*",
-            ".*invalid value encountered in divide*",
-            ".*mean of empty slice*",
-            ".*self.log*",
+def resample_data_generate_durations(config_data, test_only=False, evaluation=False):
+    if not test_only:
+        dsets = [
+            "synth_folder",
+            "synth_val_folder",
+            "strong_folder",
+            "weak_folder",
+            "unlabeled_folder",
+            "test_folder",
         ]
-        for message in to_ignore:
-            warnings.filterwarnings("ignore", message)
+    elif not evaluation:
+        dsets = ["test_folder"]
+    else:
+        dsets = ["eval_folder"]
 
-    def update_ema(self, alpha, global_step, model, ema_model):
-        """Update teacher model parameters
+    for dset in dsets:
+        computed = resample_folder(
+            config_data[dset + "_44k"], config_data[dset], target_fs=config_data["fs"]
+        )
 
-        Args:
-            alpha: float, the factor to be used between each updated step.
-            global_step: int, the current global step to be used.
-            model: torch.Module, student model to use
-            ema_model: torch.Module, teacher model to use
-        """
-        # Use the true average until the exponential average is more correct
-        alpha = min(1 - 1 / (global_step + 1), alpha)
-        for ema_params, params in zip(ema_model.parameters(), model.parameters()):
-            ema_params.data.mul_(alpha).add_(params.data, alpha=1 - alpha)
+    if not evaluation:
+        for base_set in ["synth_val", "test"]:
+            if not os.path.exists(config_data[base_set + "_dur"]) or computed:
+                generate_tsv_wav_durations(
+                    config_data[base_set + "_folder"], config_data[base_set + "_dur"]
+                )
 
-    def _init_scaler(self):
-        """Scaler inizialization
 
-        Raises:
-            NotImplementedError: in case of not Implemented scaler
+def single_run(
+    config,
+    log_dir,
+    gpus,
+    strong_real=False,
+    checkpoint_resume=None,
+    test_state_dict=None,
+    fast_dev_run=False,
+    evaluation=False,
+    callbacks=None,
+    use_filter_aug=True,
+    filter_aug_prob=0.5,
+    use_spec_aug=False,
+    spec_aug_prob=0.5,
+    use_time_stretch=True,
+    time_stretch_prob=0.5,
+):
+    """
+    Running sound event detection baseline
 
-        Returns:
-            TorchScaler: returns the scaler
-        """
+    Args:
+        config (dict): the dictionary of configuration params
+        log_dir (str): path to log directory
+        gpus (int): number of gpus to use
+        strong_real (bool): whether to use strong real annotations
+        checkpoint_resume (str, optional): path to checkpoint to resume from
+        test_state_dict (dict, optional): if not None, no training is involved
+        fast_dev_run (bool, optional): whether to use a run with only one batch
+        evaluation (bool): whether this is an evaluation run
+        callbacks: pytorch lightning callbacks
+        use_filter_aug (bool): whether to use filter augmentation
+        filter_aug_prob (float): probability of applying filter augmentation
+        use_spec_aug (bool): whether to use spec augmentation
+        spec_aug_prob (float): probability of applying spec augmentation
+        use_time_stretch (bool): whether to use time stretch augmentation
+        time_stretch_prob (float): probability of applying time stretch
+    """
+    config.update({"log_dir": log_dir})
 
-        if self.hparams["scaler"]["statistic"] == "instance":
-            scaler = TorchScaler(
-                "instance",
-                self.hparams["scaler"]["normtype"],
-                self.hparams["scaler"]["dims"],
+    # handle seed
+    seed = config["training"]["seed"]
+    if seed:
+        pl.seed_everything(seed, workers=True)
+
+    ##### data prep test ##########
+    encoder = ManyHotEncoder(
+        list(classes_labels.keys()),
+        audio_len=config["data"]["audio_max_len"],
+        frame_len=config["feats"]["n_filters"],
+        frame_hop=config["feats"]["hop_length"],
+        net_pooling=config["data"]["net_subsample"],
+        fs=config["data"]["fs"],
+    )
+
+    if not evaluation:
+        devtest_df = pd.read_csv(config["data"]["test_tsv"], sep="\t")
+        devtest_dataset = StronglyAnnotatedSet(
+            config["data"]["test_folder"],
+            devtest_df,
+            encoder,
+            return_filename=True,
+            pad_to=config["data"]["audio_max_len"],
+            test=True,
+        )
+    else:
+        devtest_dataset = UnlabeledSet(
+            config["data"]["eval_folder"], 
+            encoder, 
+            pad_to=None, 
+            return_filename=True
+        )
+
+    test_dataset = devtest_dataset
+
+    ##### model definition  ############
+    sed_student = CRNN(**config["net"])
+
+    if test_state_dict is None:
+        ##### data prep train valid ##########
+        synth_df = pd.read_csv(config["data"]["synth_tsv"], sep="\t")
+        synth_set = StronglyAnnotatedSet(
+            config["data"]["synth_folder"],
+            synth_df,
+            encoder,
+            pad_to=config["data"]["audio_max_len"],
+            feats_pipeline=feature_extraction,
+            use_filter_aug=use_filter_aug,
+            filter_aug_prob=filter_aug_prob,
+            use_spec_aug=use_spec_aug,
+            spec_aug_prob=spec_aug_prob,
+            use_time_stretch=False,  # Typically disabled for strongly annotated
+            time_stretch_prob=time_stretch_prob,
+        )
+
+        if strong_real:
+            strong_df = pd.read_csv(config["data"]["strong_tsv"], sep="\t")
+            strong_set = StronglyAnnotatedSet(
+                config["data"]["strong_folder"],
+                strong_df,
+                encoder,
+                pad_to=config["data"]["audio_max_len"],
+                feats_pipeline=feature_extraction,
+                use_filter_aug=use_filter_aug,
+                filter_aug_prob=filter_aug_prob,
+                use_spec_aug=use_spec_aug,
+                spec_aug_prob=spec_aug_prob,
+                use_time_stretch=False,  # Typically disabled for strongly annotated
+                time_stretch_prob=time_stretch_prob,
             )
 
-            return scaler
-        elif self.hparams["scaler"]["statistic"] == "dataset":
-            # we fit the scaler
-            scaler = TorchScaler(
-                "dataset",
-                self.hparams["scaler"]["normtype"],
-                self.hparams["scaler"]["dims"],
-            )
+        weak_df = pd.read_csv(config["data"]["weak_tsv"], sep="\t")
+        train_weak_df = weak_df.sample(
+            frac=config["training"]["weak_split"],
+            random_state=config["training"]["seed"],
+        )
+        valid_weak_df = weak_df.drop(train_weak_df.index).reset_index(drop=True)
+        train_weak_df = train_weak_df.reset_index(drop=True)
+        weak_set = WeakSet(
+            config["data"]["weak_folder"],
+            train_weak_df,
+            encoder,
+            pad_to=config["data"]["audio_max_len"],
+            feats_pipeline=feature_extraction,
+            use_filter_aug=use_filter_aug,
+            filter_aug_prob=filter_aug_prob,
+            use_spec_aug=use_spec_aug,
+            spec_aug_prob=spec_aug_prob,
+            use_time_stretch=use_time_stretch,
+            time_stretch_prob=time_stretch_prob,
+        )
+
+        unlabeled_set = UnlabeledSet(
+            config["data"]["unlabeled_folder"],
+            encoder,
+            pad_to=config["data"]["audio_max_len"],
+            feats_pipeline=feature_extraction,
+            use_filter_aug=use_filter_aug,
+            filter_aug_prob=filter_aug_prob,
+            use_spec_aug=use_spec_aug,
+            spec_aug_prob=spec_aug_prob,
+            use_time_stretch=use_time_stretch,
+            time_stretch_prob=time_stretch_prob,
+        )
+
+        synth_df_val = pd.read_csv(config["data"]["synth_val_tsv"], sep="\t")
+        synth_val = StronglyAnnotatedSet(
+            config["data"]["synth_val_folder"],
+            synth_df_val,
+            encoder,
+            return_filename=True,
+            pad_to=config["data"]["audio_max_len"],
+            test=True,
+        )
+
+        weak_val = WeakSet(
+            config["data"]["weak_folder"],
+            valid_weak_df,
+            encoder,
+            pad_to=config["data"]["audio_max_len"],
+            return_filename=True,
+            test=True,
+        )
+
+        if strong_real:
+            strong_full_set = torch.utils.data.ConcatDataset([strong_set, synth_set])
+            tot_train_data = [strong_full_set, weak_set, unlabeled_set]
         else:
-            raise NotImplementedError
-        if self.hparams["scaler"]["savepath"] is not None:
-            if os.path.exists(self.hparams["scaler"]["savepath"]):
-                scaler = torch.load(self.hparams["scaler"]["savepath"])
-                print(
-                    "Loaded Scaler from previous checkpoint from {}".format(
-                        self.hparams["scaler"]["savepath"]
-                    )
+            tot_train_data = [synth_set, weak_set, unlabeled_set]
+        train_dataset = torch.utils.data.ConcatDataset(tot_train_data)
+
+        batch_sizes = config["training"]["batch_size"]
+        samplers = [torch.utils.data.RandomSampler(x) for x in tot_train_data]
+        batch_sampler = ConcatDatasetBatchSampler(samplers, batch_sizes)
+
+        valid_dataset = torch.utils.data.ConcatDataset([synth_val, weak_val])
+
+        ##### training params and optimizers ############
+        epoch_len = min(
+            [
+                len(tot_train_data[indx])
+                // (
+                    config["training"]["batch_size"][indx]
+                    * config["training"]["accumulate_batches"]
                 )
-                return scaler
-
-        self.train_loader = self.train_dataloader()
-        scaler.fit(
-            self.train_loader,
-            transform_func=lambda x: self.take_log(self.mel_spec(x[0])),
-        )
-
-        if self.hparams["scaler"]["savepath"] is not None:
-            torch.save(scaler, self.hparams["scaler"]["savepath"])
-            print(
-                "Saving Scaler from previous checkpoint at {}".format(
-                    self.hparams["scaler"]["savepath"]
-                )
-            )
-            return scaler
-
-    def take_log(self, mels):
-        """Apply the log transformation to mel spectrograms.
-        Args:
-            mels: torch.Tensor, mel spectrograms for which to apply log.
-
-        Returns:
-            Tensor: logarithmic mel spectrogram of the mel spectrogram given as input
-        """
-
-        amp_to_db = AmplitudeToDB(stype="amplitude")
-        amp_to_db.amin = 1e-5  # amin= 1e-5 as in librosa
-        return amp_to_db(mels).clamp(min=-50, max=80)  # clamp to reproduce old code
-
-    def detect(self, mel_feats, model):
-        return model(self.scaler(self.take_log(mel_feats)))
-
-    def training_step(self, batch, batch_indx):
-        """Apply the training for one batch (a step). Used during trainer.fit
-
-        Args:
-            batch: torch.Tensor, batch input tensor
-            batch_indx: torch.Tensor, 1D tensor of indexes to know which data are present in each batch.
-
-        Returns:
-           torch.Tensor, the loss to take into account.
-        """
-
-        audio, labels, padded_indxs, _ = batch
-        indx_synth, indx_weak, indx_unlabelled = self.hparams["training"]["batch_size"]
-        features = self.mel_spec(audio)
-
-        batch_num = features.shape[0]
-        # deriving masks for each dataset
-        strong_mask = torch.zeros(batch_num).to(features).bool()
-        weak_mask = torch.zeros(batch_num).to(features).bool()
-        strong_mask[:indx_synth] = 1
-        weak_mask[indx_synth : indx_weak + indx_synth] = 1
-
-        # deriving weak labels
-        labels_weak = (torch.sum(labels[weak_mask], -1) > 0).float()
-
-        mixup_type = self.hparams["training"].get("mixup")
-        if mixup_type is not None and 0.5 > random.random():
-            features[weak_mask], labels_weak = mixup(
-                features[weak_mask], labels_weak, mixup_label_type=mixup_type
-            )
-            features[strong_mask], labels[strong_mask] = mixup(
-                features[strong_mask], labels[strong_mask], mixup_label_type=mixup_type
-            )
-
-        # sed student forward
-        strong_preds_student, weak_preds_student = self.detect(
-            features, self.sed_student
-        )
-
-        # supervised loss on strong labels
-        loss_strong = self.supervised_loss(
-            strong_preds_student[strong_mask], labels[strong_mask]
-        )
-        # supervised loss on weakly labelled
-        loss_weak = self.supervised_loss(weak_preds_student[weak_mask], labels_weak)
-        # total supervised loss
-        tot_loss_supervised = loss_strong + loss_weak
-
-        with torch.no_grad():
-            strong_preds_teacher, weak_preds_teacher = self.detect(
-                features, self.sed_teacher
-            )
-            loss_strong_teacher = self.supervised_loss(
-                strong_preds_teacher[strong_mask], labels[strong_mask]
-            )
-
-            loss_weak_teacher = self.supervised_loss(
-                weak_preds_teacher[weak_mask], labels_weak
-            )
-        # we apply consistency between the predictions, use the scheduler for learning rate (to be changed ?)
-        weight = (
-            self.hparams["training"]["const_max"]
-            * self.scheduler["scheduler"]._get_scaling_factor()
-        )
-
-        strong_self_sup_loss = self.selfsup_loss(
-            strong_preds_student, strong_preds_teacher.detach()
-        )
-        weak_self_sup_loss = self.selfsup_loss(
-            weak_preds_student, weak_preds_teacher.detach()
-        )
-        tot_self_loss = (strong_self_sup_loss + weak_self_sup_loss) * weight
-
-        tot_loss = tot_loss_supervised + tot_self_loss
-
-        self.log("train/student/loss_strong", loss_strong)
-        self.log("train/student/loss_weak", loss_weak)
-        self.log("train/teacher/loss_strong", loss_strong_teacher)
-        self.log("train/teacher/loss_weak", loss_weak_teacher)
-        self.log("train/step", self.scheduler["scheduler"].step_num, prog_bar=True)
-        self.log("train/student/tot_self_loss", tot_self_loss, prog_bar=True)
-        self.log("train/weight", weight)
-        self.log("train/student/tot_supervised", strong_self_sup_loss, prog_bar=True)
-        self.log("train/student/weak_self_sup_loss", weak_self_sup_loss)
-        self.log("train/student/strong_self_sup_loss", strong_self_sup_loss)
-        self.log("train/lr", self.opt.param_groups[-1]["lr"], prog_bar=True)
-
-        return tot_loss
-
-    def on_before_zero_grad(self, *args, **kwargs):
-        # update EMA teacher
-        self.update_ema(
-            self.hparams["training"]["ema_factor"],
-            self.scheduler["scheduler"].step_num,
-            self.sed_student,
-            self.sed_teacher,
-        )
-
-    def validation_step(self, batch, batch_indx):
-        """Apply validation to a batch (step). Used during trainer.fit
-
-        Args:
-            batch: torch.Tensor, input batch tensor
-            batch_indx: torch.Tensor, 1D tensor of indexes to know which data are present in each batch.
-        Returns:
-        """
-
-        audio, labels, padded_indxs, filenames, _ = batch
-
-        # prediction for student
-        mels = self.mel_spec(audio)
-        strong_preds_student, weak_preds_student = self.detect(mels, self.sed_student)
-        # prediction for teacher
-        strong_preds_teacher, weak_preds_teacher = self.detect(mels, self.sed_teacher)
-
-        # we derive masks for each dataset based on folders of filenames
-        mask_weak = (
-            torch.tensor(
-                [
-                    str(Path(x).parent)
-                    == str(Path(self.hparams["data"]["weak_folder"]))
-                    for x in filenames
-                ]
-            )
-            .to(audio)
-            .bool()
-        )
-        mask_synth = (
-            torch.tensor(
-                [
-                    str(Path(x).parent)
-                    == str(Path(self.hparams["data"]["synth_val_folder"]))
-                    for x in filenames
-                ]
-            )
-            .to(audio)
-            .bool()
-        )
-
-        if torch.any(mask_weak):
-            labels_weak = (torch.sum(labels[mask_weak], -1) >= 1).float()
-
-            loss_weak_student = self.supervised_loss(
-                weak_preds_student[mask_weak], labels_weak
-            )
-            loss_weak_teacher = self.supervised_loss(
-                weak_preds_teacher[mask_weak], labels_weak
-            )
-            self.log("val/weak/student/loss_weak", loss_weak_student)
-            self.log("val/weak/teacher/loss_weak", loss_weak_teacher)
-
-            # accumulate f1 score for weak labels
-            self.get_weak_student_f1_seg_macro(
-                weak_preds_student[mask_weak], labels_weak.long()
-            )
-            self.get_weak_teacher_f1_seg_macro(
-                weak_preds_teacher[mask_weak], labels_weak.long()
-            )
-
-        if torch.any(mask_synth):
-            loss_strong_student = self.supervised_loss(
-                strong_preds_student[mask_synth], labels[mask_synth]
-            )
-            loss_strong_teacher = self.supervised_loss(
-                strong_preds_teacher[mask_synth], labels[mask_synth]
-            )
-
-            self.log("val/synth/student/loss_strong", loss_strong_student)
-            self.log("val/synth/teacher/loss_strong", loss_strong_teacher)
-
-            filenames_synth = [
-                x
-                for x in filenames
-                if Path(x).parent == Path(self.hparams["data"]["synth_val_folder"])
+                for indx in range(len(tot_train_data))
             ]
-
-            (
-                scores_raw_student_strong,
-                scores_postprocessed_student_strong,
-                decoded_student_strong,
-            ) = batched_decode_preds(
-                strong_preds_student[mask_synth],
-                filenames_synth,
-                self.encoder,
-                median_filter=self.hparams["training"]["median_window"],
-                thresholds=list(self.val_buffer_student_synth.keys()),
-            )
-
-            self.val_scores_postprocessed_buffer_student_synth.update(
-                scores_postprocessed_student_strong
-            )
-            for th in self.val_buffer_student_synth.keys():
-                self.val_buffer_student_synth[th] = pd.concat(
-                    [self.val_buffer_student_synth[th], decoded_student_strong[th]],
-                    ignore_index=True,
-                )
-
-            (
-                scores_raw_teacher_strong,
-                scores_postprocessed_teacher_strong,
-                decoded_teacher_strong,
-            ) = batched_decode_preds(
-                strong_preds_teacher[mask_synth],
-                filenames_synth,
-                self.encoder,
-                median_filter=self.hparams["training"]["median_window"],
-                thresholds=list(self.val_buffer_teacher_synth.keys()),
-            )
-
-            self.val_scores_postprocessed_buffer_teacher_synth.update(
-                scores_postprocessed_teacher_strong
-            )
-            for th in self.val_buffer_teacher_synth.keys():
-                self.val_buffer_teacher_synth[th] = pd.concat(
-                    [self.val_buffer_teacher_synth[th], decoded_teacher_strong[th]],
-                    ignore_index=True,
-                )
-
-        return
-
-    def validation_epoch_end(self, outputs):
-        """Fonction applied at the end of all the validation steps of the epoch.
-
-        Args:
-            outputs: torch.Tensor, the concatenation of everything returned by validation_step.
-
-        Returns:
-            torch.Tensor, the objective metric to be used to choose the best model from for example.
-        """
-
-        weak_student_f1_macro = self.get_weak_student_f1_seg_macro.compute()
-        weak_teacher_f1_macro = self.get_weak_teacher_f1_seg_macro.compute()
-
-        # synth dataset
-        ground_truth = sed_scores_eval.io.read_ground_truth_events(
-            self.hparams["data"]["synth_val_tsv"]
-        )
-        audio_durations = sed_scores_eval.io.read_audio_durations(
-            self.hparams["data"]["synth_val_dur"]
-        )
-        if self.fast_dev_run:
-            ground_truth = {
-                audio_id: ground_truth[audio_id]
-                for audio_id in self.val_scores_postprocessed_buffer_student_synth
-            }
-            audio_durations = {
-                audio_id: audio_durations[audio_id]
-                for audio_id in self.val_scores_postprocessed_buffer_student_synth
-            }
-        else:
-            # drop audios without events
-            ground_truth = {
-                audio_id: gt for audio_id, gt in ground_truth.items() if len(gt) > 0
-            }
-            audio_durations = {
-                audio_id: audio_durations[audio_id] for audio_id in ground_truth.keys()
-            }
-        psds1_student_sed_scores_eval = compute_psds_from_scores(
-            self.val_scores_postprocessed_buffer_student_synth,
-            ground_truth,
-            audio_durations,
-            dtc_threshold=0.7,
-            gtc_threshold=0.7,
-            cttc_threshold=None,
-            alpha_ct=0,
-            alpha_st=1,
-            # save_dir=os.path.join(save_dir, "student", "scenario1"),
-        )
-        intersection_f1_macro_student = compute_per_intersection_macro_f1(
-            self.val_buffer_student_synth,
-            self.hparams["data"]["synth_val_tsv"],
-            self.hparams["data"]["synth_val_dur"],
-        )
-        synth_student_event_macro = log_sedeval_metrics(
-            self.val_buffer_student_synth[0.5],
-            self.hparams["data"]["synth_val_tsv"],
-        )[0]
-        intersection_f1_macro_teacher = compute_per_intersection_macro_f1(
-            self.val_buffer_teacher_synth,
-            self.hparams["data"]["synth_val_tsv"],
-            self.hparams["data"]["synth_val_dur"],
         )
 
-        synth_teacher_event_macro = log_sedeval_metrics(
-            self.val_buffer_teacher_synth[0.5],
-            self.hparams["data"]["synth_val_tsv"],
-        )[0]
-
-        obj_metric_synth_type = self.hparams["training"].get("obj_metric_synth_type")
-        if obj_metric_synth_type is None:
-            synth_metric = psds1_student_sed_scores_eval
-        elif obj_metric_synth_type == "event":
-            synth_metric = synth_student_event_macro
-        elif obj_metric_synth_type == "intersection":
-            synth_metric = intersection_f1_macro_student
-        elif obj_metric_synth_type == "psds":
-            synth_metric = psds1_student_sed_scores_eval
-        else:
-            raise NotImplementedError(
-                f"obj_metric_synth_type: {obj_metric_synth_type} not implemented."
-            )
-
-        obj_metric = torch.tensor(weak_student_f1_macro.item() + synth_metric)
-
-        self.log("val/obj_metric", obj_metric, prog_bar=True)
-        self.log("val/weak/student/macro_F1", weak_student_f1_macro)
-        self.log("val/weak/teacher/macro_F1", weak_teacher_f1_macro)
-        self.log(
-            "val/synth/student/psds1_sed_scores_eval", psds1_student_sed_scores_eval
+        opt = torch.optim.Adam(
+            sed_student.parameters(), config["opt"]["lr"], betas=(0.9, 0.999)
         )
-        self.log(
-            "val/synth/student/intersection_f1_macro", intersection_f1_macro_student
-        )
-        self.log(
-            "val/synth/teacher/intersection_f1_macro", intersection_f1_macro_teacher
-        )
-        self.log("val/synth/student/event_f1_macro", synth_student_event_macro)
-        self.log("val/synth/teacher/event_f1_macro", synth_teacher_event_macro)
-
-        # free the buffers
-        self.val_buffer_student_synth = {
-            k: pd.DataFrame() for k in self.hparams["training"]["val_thresholds"]
+        exp_steps = config["training"]["n_epochs_warmup"] * epoch_len
+        exp_scheduler = {
+            "scheduler": ExponentialWarmup(opt, config["opt"]["lr"], exp_steps),
+            "interval": "step",
         }
-        self.val_buffer_teacher_synth = {
-            k: pd.DataFrame() for k in self.hparams["training"]["val_thresholds"]
-        }
-        self.val_scores_postprocessed_buffer_student_synth = {}
-        self.val_scores_postprocessed_buffer_teacher_synth = {}
-
-        self.get_weak_student_f1_seg_macro.reset()
-        self.get_weak_teacher_f1_seg_macro.reset()
-
-        return obj_metric
-
-    def on_save_checkpoint(self, checkpoint):
-        checkpoint["sed_student"] = self.sed_student.state_dict()
-        checkpoint["sed_teacher"] = self.sed_teacher.state_dict()
-        return checkpoint
-
-    def test_step(self, batch, batch_indx):
-        """Apply Test to a batch (step), used only when (trainer.test is called)
-
-        Args:
-            batch: torch.Tensor, input batch tensor
-            batch_indx: torch.Tensor, 1D tensor of indexes to know which data are present in each batch.
-        Returns:
-        """
-
-        audio, labels, padded_indxs, filenames, _ = batch
-
-        # prediction for student
-        mels = self.mel_spec(audio)
-        strong_preds_student, weak_preds_student = self.detect(mels, self.sed_student)
-        # prediction for teacher
-        strong_preds_teacher, weak_preds_teacher = self.detect(mels, self.sed_teacher)
-
-        if not self.evaluation:
-            loss_strong_student = self.supervised_loss(strong_preds_student, labels)
-            loss_strong_teacher = self.supervised_loss(strong_preds_teacher, labels)
-
-            self.log("test/student/loss_strong", loss_strong_student)
-            self.log("test/teacher/loss_strong", loss_strong_teacher)
-
-        # compute psds
-        (
-            scores_raw_student_strong,
-            scores_postprocessed_student_strong,
-            decoded_student_strong,
-        ) = batched_decode_preds(
-            strong_preds_student,
-            filenames,
-            self.encoder,
-            median_filter=self.hparams["training"]["median_window"],
-            thresholds=list(self.test_psds_buffer_student.keys()) + [0.5],
+        logger = TensorBoardLogger(
+            os.path.dirname(config["log_dir"]),
+            config["log_dir"].split("/")[-1],
         )
+        logger.log_hyperparams(config)
+        print(f"experiment dir: {logger.log_dir}")
+        
+        # Log augmentation settings
+        print(f"\n=== Augmentation Settings ===")
+        print(f"Filter Augmentation: {'ON' if use_filter_aug else 'OFF'} (prob={filter_aug_prob})")
+        print(f"Spec Augmentation: {'ON' if use_spec_aug else 'OFF'} (prob={spec_aug_prob})")
+        print(f"Time Stretch: {'ON' if use_time_stretch else 'OFF'} (prob={time_stretch_prob})")
+        print(f"=============================\n")
 
-        self.test_scores_raw_buffer_student.update(scores_raw_student_strong)
-        self.test_scores_postprocessed_buffer_student.update(
-            scores_postprocessed_student_strong
+        if callbacks is None:
+            callbacks = [
+                EarlyStopping(
+                    monitor="val/obj_metric",
+                    patience=config["training"]["early_stop_patience"],
+                    verbose=True,
+                    mode="max",
+                ),
+                ModelCheckpoint(
+                    logger.log_dir,
+                    monitor="val/obj_metric",
+                    save_top_k=1,
+                    mode="max",
+                    save_last=True,
+                ),
+            ]
+    else:
+        train_dataset = None
+        valid_dataset = None
+        batch_sampler = None
+        opt = None
+        exp_scheduler = None
+        logger = True
+        callbacks = None
+
+    desed_training = SEDTask4(
+        config,
+        encoder=encoder,
+        sed_student=sed_student,
+        opt=opt,
+        train_data=train_dataset,
+        valid_data=valid_dataset,
+        test_data=test_dataset,
+        train_sampler=batch_sampler,
+        scheduler=exp_scheduler,
+        fast_dev_run=fast_dev_run,
+        evaluation=evaluation,
+    )
+
+    # Not using the fast_dev_run of Trainer because creates a DummyLogger so cannot check problems with the Logger
+    if fast_dev_run:
+        flush_logs_every_n_steps = 1
+        log_every_n_steps = 1
+        limit_train_batches = 2
+        limit_val_batches = 2
+        limit_test_batches = 2
+        n_epochs = 3
+    else:
+        flush_logs_every_n_steps = 100
+        log_every_n_steps = 40
+        limit_train_batches = 1.0
+        limit_val_batches = 1.0
+        limit_test_batches = 1.0
+        n_epochs = config["training"]["n_epochs"]
+
+    if gpus == "0":
+        accelerator = "cpu"
+        devices = 1
+    elif gpus == "1":
+        accelerator = "gpu"
+        devices = 1
+    else:
+        raise NotImplementedError("Multiple GPUs are currently not supported")
+
+    trainer = pl.Trainer(
+        precision=config["training"]["precision"],
+        max_epochs=n_epochs,
+        callbacks=callbacks,
+        accelerator=accelerator,
+        devices=devices,
+        strategy="auto",
+        accumulate_grad_batches=config["training"]["accumulate_batches"],
+        logger=logger,
+        gradient_clip_val=config["training"]["gradient_clip"],
+        check_val_every_n_epoch=config["training"]["validation_interval"],
+        num_sanity_val_steps=0,
+        log_every_n_steps=log_every_n_steps,
+        limit_train_batches=limit_train_batches,
+        limit_val_batches=limit_val_batches,
+        limit_test_batches=limit_test_batches,
+        deterministic=config["training"]["deterministic"],
+        enable_progress_bar=config["training"]["enable_progress_bar"],
+    )
+    if test_state_dict is None:
+        # start tracking energy consumption
+        trainer.fit(desed_training, ckpt_path=checkpoint_resume)
+        best_path = trainer.checkpoint_callback.best_model_path
+        print(f"best model: {best_path}")
+        test_state_dict = torch.load(best_path)["state_dict"]
+
+    desed_training.load_state_dict(test_state_dict)
+    trainer.test(desed_training)
+
+
+def prepare_run(argv=None):
+    parser = argparse.ArgumentParser("Training a SED system for DESED Task")
+    parser.add_argument(
+        "--conf_file",
+        default="./confs/default.yaml",
+        help="The configuration file with all the experiment parameters.",
+    )
+    parser.add_argument(
+        "--log_dir",
+        default="./exp/2023_baseline",
+        help="Directory where to save tensorboard logs, saved models, etc.",
+    )
+    parser.add_argument(
+        "--strong_real",
+        action="store_true",
+        default=False,
+        help="The strong annotations coming from Audioset will be included in the training phase.",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        default=None,
+        help="Allow the training to be resumed, take as input a previously saved model (.ckpt).",
+    )
+    parser.add_argument(
+        "--test_from_checkpoint", 
+        default=None, 
+        help="Test the model specified"
+    )
+    parser.add_argument(
+        "--gpus",
+        default="1",
+        help="The number of GPUs to train on, or the gpu to use, default='1', "
+        "so uses one GPU",
+    )
+    parser.add_argument(
+        "--fast_dev_run",
+        action="store_true",
+        default=False,
+        help="Use this option to make a 'fake' run which is useful for development and debugging. "
+        "It uses very few batches and epochs so it won't give any meaningful result.",
+    )
+    parser.add_argument(
+        "--eval_from_checkpoint", 
+        default=None, 
+        help="Evaluate the model specified"
+    )
+    
+    # Augmentation arguments
+    parser.add_argument(
+        "--use_filter_aug",
+        action="store_true",
+        default=True,
+        help="Enable filter augmentation (default: True)",
+    )
+    parser.add_argument(
+        "--no_filter_aug",
+        action="store_false",
+        dest="use_filter_aug",
+        help="Disable filter augmentation",
+    )
+    parser.add_argument(
+        "--filter_aug_prob",
+        type=float,
+        default=0.5,
+        help="Probability of applying filter augmentation (default: 0.5)",
+    )
+    parser.add_argument(
+        "--use_spec_aug",
+        action="store_true",
+        default=False,
+        help="Enable spec augmentation (default: False)",
+    )
+    parser.add_argument(
+        "--spec_aug_prob",
+        type=float,
+        default=0.5,
+        help="Probability of applying spec augmentation (default: 0.5)",
+    )
+    parser.add_argument(
+        "--use_time_stretch",
+        action="store_true",
+        default=True,
+        help="Enable time stretch augmentation (default: True)",
+    )
+    parser.add_argument(
+        "--no_time_stretch",
+        action="store_false",
+        dest="use_time_stretch",
+        help="Disable time stretch augmentation",
+    )
+    parser.add_argument(
+        "--time_stretch_prob",
+        type=float,
+        default=0.5,
+        help="Probability of applying time stretch (default: 0.5)",
+    )
+
+    args = parser.parse_args(argv)
+
+    with open(args.conf_file, "r") as f:
+        configs = yaml.safe_load(f)
+
+    evaluation = False
+    test_from_checkpoint = args.test_from_checkpoint
+
+    if args.eval_from_checkpoint is not None:
+        test_from_checkpoint = args.eval_from_checkpoint
+        evaluation = True
+
+    test_model_state_dict = None
+    if test_from_checkpoint is not None:
+        checkpoint = torch.load(test_from_checkpoint)
+        configs_ckpt = checkpoint["hyper_parameters"]
+        configs_ckpt["data"] = configs["data"]
+        print(
+            f"loaded model: {test_from_checkpoint} \n"
+            f"at epoch: {checkpoint['epoch']}"
         )
-        for th in self.test_psds_buffer_student.keys():
-            self.test_psds_buffer_student[th] = pd.concat(
-                [self.test_psds_buffer_student[th], decoded_student_strong[th]],
-                ignore_index=True,
-            )
+        test_model_state_dict = checkpoint["state_dict"]
 
-        (
-            scores_raw_teacher_strong,
-            scores_postprocessed_teacher_strong,
-            decoded_teacher_strong,
-        ) = batched_decode_preds(
-            strong_preds_teacher,
-            filenames,
-            self.encoder,
-            median_filter=self.hparams["training"]["median_window"],
-            thresholds=list(self.test_psds_buffer_teacher.keys()) + [0.5],
-        )
+    if evaluation:
+        configs["training"]["batch_size_val"] = 1
 
-        self.test_scores_raw_buffer_teacher.update(scores_raw_teacher_strong)
-        self.test_scores_postprocessed_buffer_teacher.update(
-            scores_postprocessed_teacher_strong
-        )
-        for th in self.test_psds_buffer_teacher.keys():
-            self.test_psds_buffer_teacher[th] = pd.concat(
-                [self.test_psds_buffer_teacher[th], decoded_teacher_strong[th]],
-                ignore_index=True,
-            )
+    test_only = test_from_checkpoint is not None
+    resample_data_generate_durations(configs["data"], test_only, evaluation)
+    
+    return configs, args, test_model_state_dict, evaluation
 
-        # compute f1 score
-        self.decoded_student_05_buffer = pd.concat(
-            [self.decoded_student_05_buffer, decoded_student_strong[0.5]]
-        )
-        self.decoded_teacher_05_buffer = pd.concat(
-            [self.decoded_teacher_05_buffer, decoded_teacher_strong[0.5]]
-        )
 
-    def on_test_epoch_end(self):
-        # pub eval dataset
-        save_dir = os.path.join(self.exp_dir, "metrics_test")
+if __name__ == "__main__":
+    # prepare run
+    configs, args, test_model_state_dict, evaluation = prepare_run()
 
-        if self.evaluation:
-            # only save prediction scores
-            save_dir_student_raw = os.path.join(save_dir, "student_scores", "raw")
-            sed_scores_eval.io.write_sed_scores(
-                self.test_scores_raw_buffer_student, save_dir_student_raw
-            )
-            print(f"\nRaw scores for student saved in: {save_dir_student_raw}")
-
-            save_dir_student_postprocessed = os.path.join(
-                save_dir, "student_scores", "postprocessed"
-            )
-            sed_scores_eval.io.write_sed_scores(
-                self.test_scores_postprocessed_buffer_student,
-                save_dir_student_postprocessed,
-            )
-            print(
-                f"\nPostprocessed scores for student saved in: {save_dir_student_postprocessed}"
-            )
-
-            save_dir_teacher_raw = os.path.join(save_dir, "teacher_scores", "raw")
-            sed_scores_eval.io.write_sed_scores(
-                self.test_scores_raw_buffer_teacher, save_dir_teacher_raw
-            )
-            print(f"\nRaw scores for teacher saved in: {save_dir_teacher_raw}")
-
-            save_dir_teacher_postprocessed = os.path.join(
-                save_dir, "teacher_scores", "postprocessed"
-            )
-            sed_scores_eval.io.write_sed_scores(
-                self.test_scores_postprocessed_buffer_teacher,
-                save_dir_teacher_postprocessed,
-            )
-            print(
-                f"\nPostprocessed scores for teacher saved in: {save_dir_teacher_postprocessed}"
-            )
-
-            self.tracker_eval.stop()
-            eval_kwh = self.tracker_eval._total_energy.kWh
-            results = {"/eval/tot_energy_kWh": torch.tensor(float(eval_kwh))}
-            with open(
-                os.path.join(self.exp_dir, "evaluation_codecarbon", "eval_tot_kwh.txt"),
-                "w",
-            ) as f:
-                f.write(str(eval_kwh))
-        else:
-            # calculate the metrics
-            ground_truth = sed_scores_eval.io.read_ground_truth_events(
-                self.hparams["data"]["test_tsv"]
-            )
-            audio_durations = sed_scores_eval.io.read_audio_durations(
-                self.hparams["data"]["test_dur"]
-            )
-            if self.fast_dev_run:
-                ground_truth = {
-                    audio_id: ground_truth[audio_id]
-                    for audio_id in self.test_scores_postprocessed_buffer_student
-                }
-                audio_durations = {
-                    audio_id: audio_durations[audio_id]
-                    for audio_id in self.test_scores_postprocessed_buffer_student
-                }
-            else:
-                # drop audios without events
-                ground_truth = {
-                    audio_id: gt for audio_id, gt in ground_truth.items() if len(gt) > 0
-                }
-                audio_durations = {
-                    audio_id: audio_durations[audio_id]
-                    for audio_id in ground_truth.keys()
-                }
-            psds1_student_psds_eval = compute_psds_from_operating_points(
-                self.test_psds_buffer_student,
-                self.hparams["data"]["test_tsv"],
-                self.hparams["data"]["test_dur"],
-                dtc_threshold=0.7,
-                gtc_threshold=0.7,
-                alpha_ct=0,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "student", "scenario1"),
-            )
-            psds1_student_sed_scores_eval = compute_psds_from_scores(
-                self.test_scores_postprocessed_buffer_student,
-                ground_truth,
-                audio_durations,
-                dtc_threshold=0.7,
-                gtc_threshold=0.7,
-                cttc_threshold=None,
-                alpha_ct=0,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "student", "scenario1"),
-            )
-
-            psds2_student_psds_eval = compute_psds_from_operating_points(
-                self.test_psds_buffer_student,
-                self.hparams["data"]["test_tsv"],
-                self.hparams["data"]["test_dur"],
-                dtc_threshold=0.1,
-                gtc_threshold=0.1,
-                cttc_threshold=0.3,
-                alpha_ct=0.5,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "student", "scenario2"),
-            )
-            psds2_student_sed_scores_eval = compute_psds_from_scores(
-                self.test_scores_postprocessed_buffer_student,
-                ground_truth,
-                audio_durations,
-                dtc_threshold=0.1,
-                gtc_threshold=0.1,
-                cttc_threshold=0.3,
-                alpha_ct=0.5,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "student", "scenario2"),
-            )
-
-            psds1_teacher_psds_eval = compute_psds_from_operating_points(
-                self.test_psds_buffer_teacher,
-                self.hparams["data"]["test_tsv"],
-                self.hparams["data"]["test_dur"],
-                dtc_threshold=0.7,
-                gtc_threshold=0.7,
-                alpha_ct=0,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "teacher", "scenario1"),
-            )
-            psds1_teacher_sed_scores_eval = compute_psds_from_scores(
-                self.test_scores_postprocessed_buffer_teacher,
-                ground_truth,
-                audio_durations,
-                dtc_threshold=0.7,
-                gtc_threshold=0.7,
-                cttc_threshold=None,
-                alpha_ct=0,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "teacher", "scenario1"),
-            )
-
-            psds2_teacher_psds_eval = compute_psds_from_operating_points(
-                self.test_psds_buffer_teacher,
-                self.hparams["data"]["test_tsv"],
-                self.hparams["data"]["test_dur"],
-                dtc_threshold=0.1,
-                gtc_threshold=0.1,
-                cttc_threshold=0.3,
-                alpha_ct=0.5,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "teacher", "scenario2"),
-            )
-            psds2_teacher_sed_scores_eval = compute_psds_from_scores(
-                self.test_scores_postprocessed_buffer_teacher,
-                ground_truth,
-                audio_durations,
-                dtc_threshold=0.1,
-                gtc_threshold=0.1,
-                cttc_threshold=0.3,
-                alpha_ct=0.5,
-                alpha_st=1,
-                save_dir=os.path.join(save_dir, "teacher", "scenario2"),
-            )
-
-            event_macro_student = log_sedeval_metrics(
-                self.decoded_student_05_buffer,
-                self.hparams["data"]["test_tsv"],
-                os.path.join(save_dir, "student"),
-            )[0]
-
-            event_macro_teacher = log_sedeval_metrics(
-                self.decoded_teacher_05_buffer,
-                self.hparams["data"]["test_tsv"],
-                os.path.join(save_dir, "teacher"),
-            )[0]
-
-            # synth dataset
-            intersection_f1_macro_student = compute_per_intersection_macro_f1(
-                {"0.5": self.decoded_student_05_buffer},
-                self.hparams["data"]["test_tsv"],
-                self.hparams["data"]["test_dur"],
-            )
-
-            # synth dataset
-            intersection_f1_macro_teacher = compute_per_intersection_macro_f1(
-                {"0.5": self.decoded_teacher_05_buffer},
-                self.hparams["data"]["test_tsv"],
-                self.hparams["data"]["test_dur"],
-            )
-
-            best_test_result = torch.tensor(
-                max(psds1_student_psds_eval, psds2_student_psds_eval)
-            )
-
-            results = {
-                "hp_metric": best_test_result,
-                "test/student/psds1_psds_eval": psds1_student_psds_eval,
-                "test/student/psds1_sed_scores_eval": psds1_student_sed_scores_eval,
-                "test/student/psds2_psds_eval": psds2_student_psds_eval,
-                "test/student/psds2_sed_scores_eval": psds2_student_sed_scores_eval,
-                "test/teacher/psds1_psds_eval": psds1_teacher_psds_eval,
-                "test/teacher/psds1_sed_scores_eval": psds1_teacher_sed_scores_eval,
-                "test/teacher/psds2_psds_eval": psds2_teacher_psds_eval,
-                "test/teacher/psds2_sed_scores_eval": psds2_teacher_sed_scores_eval,
-                "test/student/event_f1_macro": event_macro_student,
-                "test/student/intersection_f1_macro": intersection_f1_macro_student,
-                "test/teacher/event_f1_macro": event_macro_teacher,
-                "test/teacher/intersection_f1_macro": intersection_f1_macro_teacher,
-            }
-            self.tracker_devtest.stop()
-            eval_kwh = self.tracker_devtest._total_energy.kWh
-            results.update({"/test/tot_energy_kWh": torch.tensor(float(eval_kwh))})
-            with open(
-                os.path.join(self.exp_dir, "devtest_codecarbon", "devtest_tot_kwh.txt"),
-                "w",
-            ) as f:
-                f.write(str(eval_kwh))
-
-        if self.logger is not None:
-            self.logger.log_metrics(results)
-            self.logger.log_hyperparams(self.hparams, results)
-
-        for key in results.keys():
-            self.log(key, results[key], prog_bar=True, logger=True)
-
-    def configure_optimizers(self):
-        return [self.opt], [self.scheduler]
-
-    def train_dataloader(self):
-        self.train_loader = torch.utils.data.DataLoader(
-            self.train_data,
-            batch_sampler=self.train_sampler,
-            num_workers=self.num_workers,
-            collate_fn = self.train_collate_fn if self.train_collate_fn else None
-        )
-
-        return self.train_loader
-
-    def val_dataloader(self):
-        self.val_loader = torch.utils.data.DataLoader(
-            self.valid_data,
-            batch_size=self.hparams["training"]["batch_size_val"],
-            num_workers=self.num_workers,
-            shuffle=False,
-            drop_last=False,
-        )
-        return self.val_loader
-
-    def test_dataloader(self):
-        self.test_loader = torch.utils.data.DataLoader(
-            self.test_data,
-            batch_size=self.hparams["training"]["batch_size_val"],
-            num_workers=self.num_workers,
-            shuffle=False,
-            drop_last=False,
-        )
-        return self.test_loader
-
-    def on_train_end(self) -> None:
-        # dump consumption
-        self.tracker_train.stop()
-        training_kwh = self.tracker_train._total_energy.kWh
-        self.logger.log_metrics(
-            {"/train/tot_energy_kWh": torch.tensor(float(training_kwh))}
-        )
-        with open(
-            os.path.join(self.exp_dir, "training_codecarbon", "training_tot_kwh.txt"),
-            "w",
-        ) as f:
-            f.write(str(training_kwh))
-
-    def on_test_start(self) -> None:
-        if self.evaluation:
-            os.makedirs(
-                os.path.join(self.exp_dir, "evaluation_codecarbon"), exist_ok=True
-            )
-            self.tracker_eval = OfflineEmissionsTracker(
-                "DCASE Task 4 SED EVALUATION",
-                output_dir=os.path.join(self.exp_dir, "evaluation_codecarbon"),
-                log_level="warning",
-                country_iso_code="FRA",
-            )
-            self.tracker_eval.start()
-        else:
-            os.makedirs(os.path.join(self.exp_dir, "devtest_codecarbon"), exist_ok=True)
-            self.tracker_devtest = OfflineEmissionsTracker(
-                "DCASE Task 4 SED DEVTEST",
-                output_dir=os.path.join(self.exp_dir, "devtest_codecarbon"),
-                log_level="warning",
-                country_iso_code="FRA",
-            )
-            self.tracker_devtest.start()
+    # launch run
+    single_run(
+        configs,
+        args.log_dir,
+        args.gpus,
+        args.strong_real,
+        args.resume_from_checkpoint,
+        test_model_state_dict,
+        args.fast_dev_run,
+        evaluation,
+        callbacks=None,
+        use_filter_aug=args.use_filter_aug,
+        filter_aug_prob=args.filter_aug_prob,
+        use_spec_aug=args.use_spec_aug,
+        spec_aug_prob=args.spec_aug_prob,
+        use_time_stretch=args.use_time_stretch,
+        time_stretch_prob=args.time_stretch_prob,
+    )
