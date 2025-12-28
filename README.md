@@ -78,7 +78,6 @@ Evaluated augmentation techniques:
 - **Time Stretch**
 - **Spectral Augmentation**
 - **Filter Augmentation**
-- **Mixup (optional)**
 
 ---
 
