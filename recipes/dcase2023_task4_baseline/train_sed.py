@@ -153,7 +153,7 @@ def single_run(
             filter_aug_prob=filter_aug_prob,
             use_spec_aug=use_spec_aug,
             spec_aug_prob=spec_aug_prob,
-            use_time_stretch=False,  # Typically disabled for strongly annotated
+            use_time_stretch=use_time_stretch, 
             time_stretch_prob=time_stretch_prob,
         )
 
@@ -169,7 +169,7 @@ def single_run(
                 filter_aug_prob=filter_aug_prob,
                 use_spec_aug=use_spec_aug,
                 spec_aug_prob=spec_aug_prob,
-                use_time_stretch=False,  # Typically disabled for strongly annotated
+                use_time_stretch=use_time_stretch,  
                 time_stretch_prob=time_stretch_prob,
             )
 
