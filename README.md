@@ -197,7 +197,6 @@ This script performs: - Training - Validation - Evaluation\
 and outputs all metrics reported in the experiments.
 
 ------------------------------------------------------------------------
-# TODO python train_sed with attributes
 
 ## Experimental Results
 
@@ -265,4 +264,14 @@ and outputs all metrics reported in the experiments.
 ---
 
 ## Conclusion
-#TODO Conclusion
+
+
+The experiments clearly show that **data augmentation has a strong and method-dependent impact** on Sound Event Detection performance.
+
+- **Baseline (no augmentation)** provides a solid and reliable reference, with balanced PSDS and F1 scores across both scenarios.
+- **Time Stretch augmentation**, when applied naively, can severely degrade performance, highlighting the sensitivity of SED models to temporal distortions. After correction, its performance recovers and slightly surpasses the baseline, but the gains remain modest.
+- **Spectral augmentation** demonstrates better robustness than time stretch. Once corrected, it consistently improves over the baseline in both PSDS scenarios and F1 metrics, indicating improved frequency-domain generalization.
+- **Filter augmentation** achieves the **best overall performance** across all reported metrics. It delivers the highest PSDS-scenario1, PSDS-scenario2, and F1 scores, confirming that modeling acoustic environment variations is particularly beneficial for this task.
+- **Mixup augmentation**, while generally effective in many audio tasks, does not provide competitive improvements here and remains below the strongest single-augmentation methods.
+
+Overall, **FilterAugment emerges as the most effective augmentation strategy** for this setup, followed by corrected spectral augmentation. Temporal augmentations should be applied cautiously, as inappropriate configurations can harm event localization perform
