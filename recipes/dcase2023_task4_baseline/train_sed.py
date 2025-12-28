@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
 import torch
+import torchaudio
 import yaml
 from desed_task.dataio import ConcatDatasetBatchSampler
 from desed_task.dataio.datasets import (StronglyAnnotatedSet, UnlabeledSet,
@@ -23,34 +24,16 @@ from pytorch_lightning.loggers import TensorBoardLogger
 
 from functools import partial
 
-from local.mixup import Mixup
+feature_extraction = torch.nn.Sequential(
+    torchaudio.transforms.MelSpectrogram(
+        sample_rate=16000,
+        n_fft=1024,
+        hop_length=320,
+        n_mels=64,
+    ),
+    torchaudio.transforms.AmplitudeToDB(),
+)
 
-
-
-def collate_fn_with_mixup(batch, mixup=None):
-    """
-    Collate function with optional mixup augmentation
-    """
-    if mixup is not None:
-        batch = mixup(batch)
-    
-    mixtures = torch.stack([item[0] for item in batch])
-    labels = torch.stack([item[1] for item in batch])
-    padded_indx = [item[2] for item in batch]
-    
-    result = [mixtures, labels, padded_indx]
-    
-    if len(batch[0]) > 3:
-        for i in range(3, len(batch[0])):
-            if isinstance(batch[0][i], torch.Tensor):
-                result.append(torch.stack([item[i] for item in batch]))
-            else:
-                result.append([item[i] for item in batch])
-    
-    return result
-
-
-        
 
 def resample_data_generate_durations(config_data, test_only=False, evaluation=False):
     if not test_only:
@@ -90,6 +73,12 @@ def single_run(
     fast_dev_run=False,
     evaluation=False,
     callbacks=None,
+    use_filter_aug=True,
+    filter_aug_prob=0.5,
+    use_spec_aug=False,
+    spec_aug_prob=0.5,
+    use_time_stretch=True,
+    time_stretch_prob=0.5,
 ):
     """
     Running sound event detection baseline
@@ -98,11 +87,18 @@ def single_run(
         config (dict): the dictionary of configuration params
         log_dir (str): path to log directory
         gpus (int): number of gpus to use
-        checkpoint_resume (str, optional): path to checkpoint to resume from. Defaults to "".
-        test_state_dict (dict, optional): if not None, no training is involved. This dictionary is the state_dict
-            to be loaded to test the model.
-        fast_dev_run (bool, optional): whether to use a run with only one batch at train and validation, useful
-            for development purposes.
+        strong_real (bool): whether to use strong real annotations
+        checkpoint_resume (str, optional): path to checkpoint to resume from
+        test_state_dict (dict, optional): if not None, no training is involved
+        fast_dev_run (bool, optional): whether to use a run with only one batch
+        evaluation (bool): whether this is an evaluation run
+        callbacks: pytorch lightning callbacks
+        use_filter_aug (bool): whether to use filter augmentation
+        filter_aug_prob (float): probability of applying filter augmentation
+        use_spec_aug (bool): whether to use spec augmentation
+        spec_aug_prob (float): probability of applying spec augmentation
+        use_time_stretch (bool): whether to use time stretch augmentation
+        time_stretch_prob (float): probability of applying time stretch
     """
     config.update({"log_dir": log_dir})
 
@@ -129,22 +125,20 @@ def single_run(
             encoder,
             return_filename=True,
             pad_to=config["data"]["audio_max_len"],
-            test = True
+            test=True,
         )
     else:
         devtest_dataset = UnlabeledSet(
-            config["data"]["eval_folder"], encoder, pad_to=None, return_filename=True
+            config["data"]["eval_folder"], 
+            encoder, 
+            pad_to=None, 
+            return_filename=True
         )
 
     test_dataset = devtest_dataset
 
     ##### model definition  ############
     sed_student = CRNN(**config["net"])
-
-    # calulate multiply–accumulate operation (MACs)
-    # macs, _ = calculate_macs(sed_student, config)
-    # print(f"---------------------------------------------------------------")
-    # print(f"Total number of multiply–accumulate operation (MACs): {macs}\n")
 
     if test_state_dict is None:
         ##### data prep train valid ##########
@@ -154,6 +148,13 @@ def single_run(
             synth_df,
             encoder,
             pad_to=config["data"]["audio_max_len"],
+            feats_pipeline=feature_extraction,
+            use_filter_aug=use_filter_aug,
+            filter_aug_prob=filter_aug_prob,
+            use_spec_aug=use_spec_aug,
+            spec_aug_prob=spec_aug_prob,
+            use_time_stretch=False,  # Typically disabled for strongly annotated
+            time_stretch_prob=time_stretch_prob,
         )
 
         if strong_real:
@@ -163,6 +164,13 @@ def single_run(
                 strong_df,
                 encoder,
                 pad_to=config["data"]["audio_max_len"],
+                feats_pipeline=feature_extraction,
+                use_filter_aug=use_filter_aug,
+                filter_aug_prob=filter_aug_prob,
+                use_spec_aug=use_spec_aug,
+                spec_aug_prob=spec_aug_prob,
+                use_time_stretch=False,  # Typically disabled for strongly annotated
+                time_stretch_prob=time_stretch_prob,
             )
 
         weak_df = pd.read_csv(config["data"]["weak_tsv"], sep="\t")
@@ -177,12 +185,26 @@ def single_run(
             train_weak_df,
             encoder,
             pad_to=config["data"]["audio_max_len"],
+            feats_pipeline=feature_extraction,
+            use_filter_aug=use_filter_aug,
+            filter_aug_prob=filter_aug_prob,
+            use_spec_aug=use_spec_aug,
+            spec_aug_prob=spec_aug_prob,
+            use_time_stretch=use_time_stretch,
+            time_stretch_prob=time_stretch_prob,
         )
 
         unlabeled_set = UnlabeledSet(
             config["data"]["unlabeled_folder"],
             encoder,
             pad_to=config["data"]["audio_max_len"],
+            feats_pipeline=feature_extraction,
+            use_filter_aug=use_filter_aug,
+            filter_aug_prob=filter_aug_prob,
+            use_spec_aug=use_spec_aug,
+            spec_aug_prob=spec_aug_prob,
+            use_time_stretch=use_time_stretch,
+            time_stretch_prob=time_stretch_prob,
         )
 
         synth_df_val = pd.read_csv(config["data"]["synth_val_tsv"], sep="\t")
@@ -192,7 +214,7 @@ def single_run(
             encoder,
             return_filename=True,
             pad_to=config["data"]["audio_max_len"],
-            test = True
+            test=True,
         )
 
         weak_val = WeakSet(
@@ -201,7 +223,7 @@ def single_run(
             encoder,
             pad_to=config["data"]["audio_max_len"],
             return_filename=True,
-            test = True
+            test=True,
         )
 
         if strong_real:
@@ -216,16 +238,6 @@ def single_run(
         batch_sampler = ConcatDatasetBatchSampler(samplers, batch_sizes)
 
         valid_dataset = torch.utils.data.ConcatDataset([synth_val, weak_val])
-
- 
-        
-        mixup_alpha = 0.2
-        mixup_prob = 0.5
-        
-        mixup = Mixup(alpha=mixup_alpha, mixup_prob=mixup_prob)
-        
-        train_collate_fn = partial(collate_fn_with_mixup, mixup=mixup)
-        
 
         ##### training params and optimizers ############
         epoch_len = min(
@@ -253,6 +265,13 @@ def single_run(
         )
         logger.log_hyperparams(config)
         print(f"experiment dir: {logger.log_dir}")
+        
+        # Log augmentation settings
+        print(f"\n=== Augmentation Settings ===")
+        print(f"Filter Augmentation: {'ON' if use_filter_aug else 'OFF'} (prob={filter_aug_prob})")
+        print(f"Spec Augmentation: {'ON' if use_spec_aug else 'OFF'} (prob={spec_aug_prob})")
+        print(f"Time Stretch: {'ON' if use_time_stretch else 'OFF'} (prob={time_stretch_prob})")
+        print(f"=============================\n")
 
         if callbacks is None:
             callbacks = [
@@ -278,7 +297,6 @@ def single_run(
         exp_scheduler = None
         logger = True
         callbacks = None
-        train_collate_fn = None
 
     desed_training = SEDTask4(
         config,
@@ -292,8 +310,6 @@ def single_run(
         scheduler=exp_scheduler,
         fast_dev_run=fast_dev_run,
         evaluation=evaluation,
-        train_collate_fn=train_collate_fn,  # Pass collate function with mixup
-        # comment this line in order not to use Mixup
     )
 
     # Not using the fast_dev_run of Trainer because creates a DummyLogger so cannot check problems with the Logger
@@ -327,7 +343,7 @@ def single_run(
         callbacks=callbacks,
         accelerator=accelerator,
         devices=devices,
-        strategy = "auto",
+        strategy="auto",
         accumulate_grad_batches=config["training"]["accumulate_batches"],
         logger=logger,
         gradient_clip_val=config["training"]["gradient_clip"],
@@ -350,6 +366,7 @@ def single_run(
     desed_training.load_state_dict(test_state_dict)
     trainer.test(desed_training)
 
+
 def prepare_run(argv=None):
     parser = argparse.ArgumentParser("Training a SED system for DESED Task")
     parser.add_argument(
@@ -362,7 +379,6 @@ def prepare_run(argv=None):
         default="./exp/2023_baseline",
         help="Directory where to save tensorboard logs, saved models, etc.",
     )
-
     parser.add_argument(
         "--strong_real",
         action="store_true",
@@ -375,7 +391,9 @@ def prepare_run(argv=None):
         help="Allow the training to be resumed, take as input a previously saved model (.ckpt).",
     )
     parser.add_argument(
-        "--test_from_checkpoint", default=None, help="Test the model specified"
+        "--test_from_checkpoint", 
+        default=None, 
+        help="Test the model specified"
     )
     parser.add_argument(
         "--gpus",
@@ -390,9 +408,60 @@ def prepare_run(argv=None):
         help="Use this option to make a 'fake' run which is useful for development and debugging. "
         "It uses very few batches and epochs so it won't give any meaningful result.",
     )
-
     parser.add_argument(
-        "--eval_from_checkpoint", default=None, help="Evaluate the model specified"
+        "--eval_from_checkpoint", 
+        default=None, 
+        help="Evaluate the model specified"
+    )
+    
+    # Augmentation arguments
+    parser.add_argument(
+        "--use_filter_aug",
+        action="store_true",
+        default=True,
+        help="Enable filter augmentation (default: True)",
+    )
+    parser.add_argument(
+        "--no_filter_aug",
+        action="store_false",
+        dest="use_filter_aug",
+        help="Disable filter augmentation",
+    )
+    parser.add_argument(
+        "--filter_aug_prob",
+        type=float,
+        default=0.5,
+        help="Probability of applying filter augmentation (default: 0.5)",
+    )
+    parser.add_argument(
+        "--use_spec_aug",
+        action="store_true",
+        default=False,
+        help="Enable spec augmentation (default: False)",
+    )
+    parser.add_argument(
+        "--spec_aug_prob",
+        type=float,
+        default=0.5,
+        help="Probability of applying spec augmentation (default: 0.5)",
+    )
+    parser.add_argument(
+        "--use_time_stretch",
+        action="store_true",
+        default=True,
+        help="Enable time stretch augmentation (default: True)",
+    )
+    parser.add_argument(
+        "--no_time_stretch",
+        action="store_false",
+        dest="use_time_stretch",
+        help="Disable time stretch augmentation",
+    )
+    parser.add_argument(
+        "--time_stretch_prob",
+        type=float,
+        default=0.5,
+        help="Probability of applying time stretch (default: 0.5)",
     )
 
     args = parser.parse_args(argv)
@@ -423,6 +492,7 @@ def prepare_run(argv=None):
 
     test_only = test_from_checkpoint is not None
     resample_data_generate_durations(configs["data"], test_only, evaluation)
+    
     return configs, args, test_model_state_dict, evaluation
 
 
@@ -440,4 +510,11 @@ if __name__ == "__main__":
         test_model_state_dict,
         args.fast_dev_run,
         evaluation,
+        callbacks=None,
+        use_filter_aug=args.use_filter_aug,
+        filter_aug_prob=args.filter_aug_prob,
+        use_spec_aug=args.use_spec_aug,
+        spec_aug_prob=args.spec_aug_prob,
+        use_time_stretch=args.use_time_stretch,
+        time_stretch_prob=args.time_stretch_prob,
     )
