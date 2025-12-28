@@ -252,16 +252,6 @@ and outputs all metrics reported in the experiments.
 
 ---
 
-### Results with Mixup Augmentation (Non-Relevant)
-
-**Mixup** applies data augmentation by linearly mixing two random samples in a batch (audio + labels, and features if present) with some probability, using a random weight λ drawn from a Beta distribution. This improves generalization and reduces overfitting.
-
-| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
-|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
-| 0.3562         | 0.3630                     | 0.5487         | 0.5564                     | 61.29%               | 39.27%          |
-
----
-
 ## Conclusion
 
 
