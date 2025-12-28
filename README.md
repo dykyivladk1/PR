@@ -255,12 +255,10 @@ and outputs all metrics reported in the experiments.
 ## Conclusion
 
 
-The experiments clearly show that **data augmentation has a strong and method-dependent impact** on Sound Event Detection performance.
+The results show that data augmentation strongly affects Sound Event Detection performance, depending on the method used. The baseline model provides a solid reference with stable results.
 
-- **Baseline (no augmentation)** provides a solid and reliable reference, with balanced PSDS and F1 scores across both scenarios.
-- **Time Stretch augmentation**, when applied naively, can severely degrade performance, highlighting the sensitivity of SED models to temporal distortions. After correction, its performance recovers and slightly surpasses the baseline, but the gains remain modest.
-- **Spectral augmentation** demonstrates better robustness than time stretch. Once corrected, it consistently improves over the baseline in both PSDS scenarios and F1 metrics, indicating improved frequency-domain generalization.
-- **Filter augmentation** achieves the **best overall performance** across all reported metrics. It delivers the highest PSDS-scenario1, PSDS-scenario2, and F1 scores, confirming that modeling acoustic environment variations is particularly beneficial for this task.
-- **Mixup augmentation**, while generally effective in many audio tasks, does not provide competitive improvements here and remains below the strongest single-augmentation methods.
+Time stretch augmentation is sensitive to configuration and can harm performance if applied incorrectly, leading only to small improvements after correction. Spectral augmentation is more robust and consistently improves results over the baseline.
 
-Overall, **FilterAugment emerges as the most effective augmentation strategy** for this setup, followed by corrected spectral augmentation. Temporal augmentations should be applied cautiously, as inappropriate configurations can harm event localization perform
+Overall, FilterAugment performs best, achieving the highest PSDS and F1 scores by effectively modeling acoustic environment variations. Mixup augmentation does not provide noticeable benefits in this setup.
+
+These findings suggest that frequency-based augmentations, especially FilterAugment, are most suitable for this task, while temporal augmentations should be applied carefully.
