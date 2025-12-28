@@ -150,10 +150,48 @@ before training
 
 Navigate to the baseline training script:
 
-``` bash
+```bash
 cd recipes/dcase2023_task4_baseline
+```
+
+#### Baseline
+```bash
 python train_sed.py
 ```
+
+#### FilterAugment only
+```bash
+python train_sed.py \
+  --use_filter_aug \
+  --filter_aug_prob 0.5 \
+  --no_time_stretch
+```
+
+#### FilterAugment + SpecAugment
+```bash
+python train_sed.py \
+  --use_filter_aug \
+  --filter_aug_prob 0.5 \
+  --use_spec_aug \
+  --spec_aug_prob 0.5 \
+  --no_time_stretch
+```
+
+#### Time Stretch only
+```bash
+python train_sed.py \
+  --no_filter_aug \
+  --use_time_stretch \
+  --time_stretch_prob 0.5
+```
+
+#### Disable all augmentations
+```bash
+python train_sed.py \
+  --no_filter_aug \
+  --no_time_stretch
+```
+
 
 This script performs: - Training - Validation - Evaluation\
 and outputs all metrics reported in the experiments.
