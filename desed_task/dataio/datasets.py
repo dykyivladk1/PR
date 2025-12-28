@@ -222,7 +222,7 @@ class StronglyAnnotatedSet(Dataset):
         labels_df = pd.DataFrame(labels)
         labels_df = process_labels(labels_df, onset_s, offset_s)
     
-        # Apply time stretch augmentation
+        # TIME-STRETCH
         if not self.test and self.use_time_stretch and random.random() < self.time_stretch_prob:
             mixture, factor = augment_time_stretch(mixture, self.fs)
     
@@ -243,11 +243,11 @@ class StronglyAnnotatedSet(Dataset):
         if self.feats_pipeline is not None:
             feats = self.feats_pipeline(mixture)
             
-            # Apply spec augmentation during training
+            # SPEC AUGMENTATION
             if not self.test and self.use_spec_aug and random.random() < self.spec_aug_prob:
                 feats = self.spec_aug(feats.unsqueeze(0)).squeeze(0)
             
-            # Apply filter augmentation during training
+            # FILTER AUGMENTATION
             if not self.test and self.use_filter_aug and random.random() < self.filter_aug_prob:
                 feats = filter_augment(feats, db_range=(-6, 6), band_range=(3, 6), mode='linear')
             
