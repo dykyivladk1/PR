@@ -225,15 +225,6 @@ and outputs all metrics reported in the experiments.
 
 ---
 
-### Results with Spectral Augmentation
-
-| PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
-|----------------|----------------------------|----------------|----------------------------|----------------------|-----------------|
-| 0.2962         | 0.3021                     | 0.4821         | 0.4821                     | 57.86%               | 34.80%          |
-
-
-
-
 ### Results with Spectral Augmentation (Corrected)
 
 | PSDS-scenario1 | PSDS-scenario1 (sed score) | PSDS-scenario2 | PSDS-scenario2 (sed score) | Intersection-based F1 | Collar-based F1 |
